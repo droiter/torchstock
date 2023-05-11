@@ -18,7 +18,9 @@ import ast
 import sys
 import lstm_stock_log as log
 import math
-   
+
+BK_SIZE = 58
+
 #cmd line parmeters.
 def cmd_line():
     parser = argparse.ArgumentParser(description='Calculate model according to stockid')
@@ -57,28 +59,34 @@ def get_mape(actual,pred):
 
 #load data from csv file and clean it.
 def load_bkdata(file_name):
-    # df=pd.read_csv('./data/'+file_name,encoding='UTF-8',na_values = missing_values,index_col=0)
-    alldf = pd.read_hdf(file_name, "index")
-    alldf = alldf.loc[alldf["date"]>"2008-06-26"]
-    alldf = alldf.set_index(["date", "exchange", "code"]).sort_index()
-    # df=df.drop(["up_count", "down_count", "update_time"],axis=1) #data format is changed in sometime we will remove some no useful columns.
-    # df.dropna(axis='index', how='any',inplace=True)
-    ratiodfList = []
-    logdfList = []
-    for code in alldf.index.get_level_values("code").unique():
-        df = alldf.loc[ (alldf.index.get_level_values("code")==code) ]
-        print(code, min(df.index.get_level_values(0)))
-        # rdf = df.loc[ :, ["open", "close", "high", "low", "vol", "amount"]].rolling(2, min_periods=2).apply(lambda x: x.iloc[1]/x.iloc[0])
-        # rdf = rdf.dropna()
-        # ratiodfList += [ rdf ]
-        ldf = df.loc[:, ["open", "close", "high", "low"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 1.3)) #, "vol", "amount"
-        ldf.loc[ :, ["vol"]] = df.loc[:, ["vol"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 120)) #, "vol", "amount"
-        ldf.loc[ :, ["amount"]] = df.loc[:, ["amount"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 45)) #, "vol", "amount"
-        ldf = ldf.dropna()
-        logdfList += [ ldf ]
+    if os.path.exists("bkcalc.hdf"):
+        logdf = pd.read_hdf("bkcalc.hdf")
+    else:
+        # df=pd.read_csv('./data/'+file_name,encoding='UTF-8',na_values = missing_values,index_col=0)
+        alldf = pd.read_hdf(file_name, "index")
+        alldf = alldf.loc[alldf["date"]>"2008-06-26"]
+        alldf = alldf.set_index(["date", "exchange", "code"]).sort_index()
+        # df=df.drop(["up_count", "down_count", "update_time"],axis=1) #data format is changed in sometime we will remove some no useful columns.
+        # df.dropna(axis='index', how='any',inplace=True)
+        ratiodfList = []
+        logdfList = []
+        for code in alldf.index.get_level_values("code").unique():
+            df = alldf.loc[ (alldf.index.get_level_values("code")==code) ]
+            print(code, min(df.index.get_level_values(0)))
+            # rdf = df.loc[ :, ["open", "close", "high", "low", "vol", "amount"]].rolling(2, min_periods=2).apply(lambda x: x.iloc[1]/x.iloc[0])
+            # rdf = rdf.dropna()
+            # ratiodfList += [ rdf ]
+            ldf = df.loc[:, ["open", "close", "high", "low"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 1.3)) #, "vol", "amount"
+            ldf.loc[ :, ["vol"]] = df.loc[:, ["vol"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 120)) #, "vol", "amount"
+            ldf.loc[ :, ["amount"]] = df.loc[:, ["amount"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 45)) #, "vol", "amount"
+            ldf = ldf.dropna()
+            logdfList += [ ldf ]
 
-    # ratiodf = pd.concat(ratiodfList).sort_index()
-    logdf = pd.concat(logdfList).sort_index()
+        # ratiodf = pd.concat(ratiodfList).sort_index()
+        logdf = pd.concat(logdfList).sort_index()
+        logdf.to_hdf("bkcalc.hdf", "idxcalc", complevel=1, complib="blosc:snappy", format="table")
+
+    print("bk size", len(logdf.loc[logdf.index.get_level_values("date")[0]].index), "col size", len(logdf.iloc[0]))
     return logdf
 
 #load data from csv file and clean it.
@@ -146,21 +154,27 @@ def process(data, batch_size, shuffle,data_index_set):
 
 # Create dataset.
 def process_bk(data, batch_size, shuffle,data_index_set):
+    args=get_args()
+    seq_len=get_args()["seq_len"]
+    steps=args["multi_steps"]
+
     seq = []
     train_seqs = []
     train_labels = []
-    predstep = 1
-    idx = 0
+    predstep = steps + seq_len
+    dataLen = 0
     for date in data.index.get_level_values("date").unique():
-        train_seq = data.loc[date].to_numpy().flatten()
+        train_seq = data.loc[date].to_numpy().flatten().tolist()
         close_4th = data.loc[date, "close"].sort_values(ascending=False).iloc[4]
-        train_label = (data.loc[date, "close"]>=close_4th).to_numpy().flatten()
-        train_seqs += [torch.FloatTensor(train_seq)]
-        train_labels += [torch.FloatTensor(train_label).view(-1)]
+        train_label = (data.loc[date, "close"]>=close_4th).to_numpy().flatten().tolist()
+        train_seqs += [train_seq]
+        train_labels += [train_label]
 
-        if idx >= predstep:
-            seq.append((train_seqs[idx - predstep], train_labels[idx]))
-        idx += 1
+        dataLen += 1
+        if dataLen >= predstep:
+            train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+            train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
+            seq.append((train_seq_ts, train_label_ts))
     seq = MyDataset(seq)
     seq = DataLoader(dataset=seq, batch_size=batch_size, shuffle=shuffle, num_workers=0, drop_last=True)
     return seq
@@ -183,9 +197,9 @@ def nn_bkdata_seq(batch_size):
         algs["val_end"]=0.95
         algs["test_begin"]=0.1
     # split
-    train = dataset[:int(len(dataset) * algs["train_end"])]
-    val  = dataset[int(len(dataset) * algs["val_begin"]):int(len(dataset) * algs["val_end"])]
-    test = dataset[int(len(dataset) * algs["test_begin"]):len(dataset)]
+    train = dataset[:int(len(dataset)/BK_SIZE * algs["train_end"])*BK_SIZE]
+    val  = dataset[int(len(dataset)/BK_SIZE * algs["val_begin"]*BK_SIZE):int(len(dataset)/BK_SIZE * algs["val_end"])*BK_SIZE]
+    test = dataset[int(len(dataset)/BK_SIZE * algs["test_begin"])*BK_SIZE:len(dataset)]
     for i in range(data_col_bypass,dataset.shape[1]):
         m, n = np.max(dataset[dataset.columns[i]]), np.min(dataset[dataset.columns[i]])
         mm={}
@@ -194,8 +208,8 @@ def nn_bkdata_seq(batch_size):
         data_mm.append(mm)
 
     #dataset.
-    Dtr = process_bk(train, batch_size, False,data_index_set)
-    Val = process_bk(val,   batch_size, False,data_index_set)
+    Dtr = process_bk(train, batch_size, True,data_index_set)
+    Val = process_bk(val,   batch_size, True,data_index_set)
     Dte = process_bk(test,  batch_size, False,data_index_set)
 
     return Dtr, Val, Dte
@@ -232,6 +246,31 @@ def nn_data_seq(batch_size):
     Dte = process(test,  batch_size, False,data_index_set)
 
     return Dtr, Val, Dte
+
+#nn module.
+class MultiLabelLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, batch_size):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.output_size = output_size
+        self.num_directions = 1 # 单向LSTM
+        self.batch_size = batch_size
+        self.lstm = nn.LSTM(self.input_size, self.hidden_size, self.num_layers, batch_first=True)
+        self.classifier = nn.Linear(self.hidden_size, self.output_size)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, input_seq):
+        batch_size, seq_len = input_seq.shape[0], input_seq.shape[1]
+        h_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
+        c_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
+        # output(batch_size, seq_len, num_directions * hidden_size)
+        output, _ = self.lstm(input_seq, (h_0, c_0)) # output(5, 30, 64)
+        output = self.classifier(output)
+        pred = self.sigmoid(output)  # (5, 24, 1)
+        pred = pred[:, -1, :]  # (5, 1)
+        return pred
 
 #nn module.
 class LSTM(nn.Module):
@@ -291,10 +330,11 @@ def train(args, Dtr, Val, path):
     if args['bidirectional']:
         model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
     else:
-        model = LSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
+        model = MultiLabelLSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
 
-    loss_function = nn.MSELoss().to(device)
-    
+    # loss_function = nn.MSELoss().to(device)
+    loss_function = nn.BCELoss().to(device)
+
     if args['optimizer'] == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), lr=args['lr'],weight_decay=args['weight_decay'])
     else:
@@ -434,7 +474,7 @@ def test(args, Dte, path,data_pred_index):
         x_smooth = np.linspace(np.min(x), np.max(x), 1000)
         y_model=make_interp_spline(x, y)
         y_smooth = y_model(x_smooth)
-        plt.title('stock pred:'+data_file_name)
+        plt.title('stock pred:'+"bk")
         plt.plot(x_smooth, y_smooth, c='green', marker='*', ms=1, alpha=0.75, label='true')
 
         pred_model=make_interp_spline(x, pred)
@@ -458,8 +498,8 @@ if __name__ == '__main__' :
           "input_size":len(data_index_set), #number of input parameters used in predition. you can modify it in data index list.
           "hidden_size":64,#number of cells in one hidden layer.
           "num_layers":1,  #number of hidden layers in predition module.
-          "output_size":1, #number of parameter will be predicted.
-          "lr":0.005,
+          "output_size":58, #number of parameter will be predicted.
+          "lr":0.001,
           "weight_decay":0.0001,
           "bidirectional":False,
           "optimizer":"adam",
@@ -506,7 +546,7 @@ if __name__ == '__main__' :
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA or CPU:", device)
     #load data to a dataFrame.
-    Dtr, Val, Dte = nn_data_seq(args['batch_size'])
+    Dtr, Val, Dte = nn_bkdata_seq(args['batch_size'])
     #train it.
     train(args, Dtr, Val, path_file)
     #teest it.
