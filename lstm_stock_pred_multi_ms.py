@@ -17,6 +17,7 @@ import argparse
 import ast
 import sys
 import lstm_stock_log as log
+import math
    
 #cmd line parmeters.
 def cmd_line():
@@ -53,6 +54,32 @@ def get_data_maxmin(index):
 def get_mape(actual,pred):
         temp=np.mean(np.abs((actual - pred) / actual)) * 100 
         return temp       
+
+#load data from csv file and clean it.
+def load_bkdata(file_name):
+    # df=pd.read_csv('./data/'+file_name,encoding='UTF-8',na_values = missing_values,index_col=0)
+    alldf = pd.read_hdf(file_name, "index")
+    alldf = alldf.loc[alldf["date"]>"2008-06-26"]
+    alldf = alldf.set_index(["date", "exchange", "code"]).sort_index()
+    # df=df.drop(["up_count", "down_count", "update_time"],axis=1) #data format is changed in sometime we will remove some no useful columns.
+    # df.dropna(axis='index', how='any',inplace=True)
+    ratiodfList = []
+    logdfList = []
+    for code in alldf.index.get_level_values("code").unique():
+        df = alldf.loc[ (alldf.index.get_level_values("code")==code) ]
+        print(code, min(df.index.get_level_values(0)))
+        # rdf = df.loc[ :, ["open", "close", "high", "low", "vol", "amount"]].rolling(2, min_periods=2).apply(lambda x: x.iloc[1]/x.iloc[0])
+        # rdf = rdf.dropna()
+        # ratiodfList += [ rdf ]
+        ldf = df.loc[:, ["open", "close", "high", "low"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 1.3)) #, "vol", "amount"
+        ldf.loc[ :, ["vol"]] = df.loc[:, ["vol"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 120)) #, "vol", "amount"
+        ldf.loc[ :, ["amount"]] = df.loc[:, ["amount"]].rolling(2, min_periods=2).apply(lambda x: math.log(x.iloc[1]/x.iloc[0], 45)) #, "vol", "amount"
+        ldf = ldf.dropna()
+        logdfList += [ ldf ]
+
+    # ratiodf = pd.concat(ratiodfList).sort_index()
+    logdf = pd.concat(logdfList).sort_index()
+    return logdf
 
 #load data from csv file and clean it.
 def load_data(file_name):
@@ -117,7 +144,63 @@ def process(data, batch_size, shuffle,data_index_set):
     seq = DataLoader(dataset=seq, batch_size=batch_size, shuffle=shuffle, num_workers=0, drop_last=True)
     return seq
 
-# split date and create datasets for train /validate and test.   
+# Create dataset.
+def process_bk(data, batch_size, shuffle,data_index_set):
+    seq = []
+    train_seqs = []
+    train_labels = []
+    predstep = 1
+    idx = 0
+    for date in data.index.get_level_values("date").unique():
+        train_seq = data.loc[date].to_numpy().flatten()
+        close_4th = data.loc[date, "close"].sort_values(ascending=False).iloc[4]
+        train_label = (data.loc[date, "close"]>=close_4th).to_numpy().flatten()
+        train_seqs += [torch.FloatTensor(train_seq)]
+        train_labels += [torch.FloatTensor(train_label).view(-1)]
+
+        if idx >= predstep:
+            seq.append((train_seqs[idx - predstep], train_labels[idx]))
+        idx += 1
+    seq = MyDataset(seq)
+    seq = DataLoader(dataset=seq, batch_size=batch_size, shuffle=shuffle, num_workers=0, drop_last=True)
+    return seq
+
+# split date and create datasets for train /validate and test.
+def nn_bkdata_seq(batch_size):
+    print('data processing...')
+    data_file_name = "bkidx.hdf"
+    dataset = load_bkdata(data_file_name)
+
+    algs=get_args()
+    #check number of data items in df, if it is too less , we can not train it.
+    if len(dataset) < 300 :
+        print("number data in %s is too less, can not train model." %data_file_name)
+        log.output("number data in %s is too less, can not train model." %data_file_name,level=1)
+        sys.exit(0) #can not find the data file.
+    else:
+        algs["train_end"]=0.95
+        algs["val_begin"]=0.1
+        algs["val_end"]=0.95
+        algs["test_begin"]=0.1
+    # split
+    train = dataset[:int(len(dataset) * algs["train_end"])]
+    val  = dataset[int(len(dataset) * algs["val_begin"]):int(len(dataset) * algs["val_end"])]
+    test = dataset[int(len(dataset) * algs["test_begin"]):len(dataset)]
+    for i in range(data_col_bypass,dataset.shape[1]):
+        m, n = np.max(dataset[dataset.columns[i]]), np.min(dataset[dataset.columns[i]])
+        mm={}
+        mm['max']=m
+        mm['min']=n
+        data_mm.append(mm)
+
+    #dataset.
+    Dtr = process_bk(train, batch_size, False,data_index_set)
+    Val = process_bk(val,   batch_size, False,data_index_set)
+    Dte = process_bk(test,  batch_size, False,data_index_set)
+
+    return Dtr, Val, Dte
+
+# split date and create datasets for train /validate and test.
 def nn_data_seq(batch_size):
     print('data processing...')
     dataset = load_data(data_file_name+".CSV")
