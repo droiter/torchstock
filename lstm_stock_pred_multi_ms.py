@@ -18,6 +18,7 @@ import ast
 import sys
 import lstm_stock_log as log
 import math
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 BK_SIZE = 58
 
@@ -165,8 +166,8 @@ def process_bk(data, batch_size, shuffle,data_index_set):
     dataLen = 0
     for date in data.index.get_level_values("date").unique():
         train_seq = data.loc[date].to_numpy().flatten().tolist()
-        close_4th = data.loc[date, "close"].sort_values(ascending=False).iloc[4]
-        train_label = (data.loc[date, "close"]>=close_4th).to_numpy().flatten().tolist()
+        close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+        train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
         train_seqs += [train_seq]
         train_labels += [train_label]
 
@@ -320,6 +321,18 @@ class BiLSTM(nn.Module):
         pred = pred[:, -1, :]        
         return pred	
     
+def calculate_metrics(pred, target, threshold=0.5):
+    pred = np.array(pred > threshold, dtype=float)
+    return {'micro/precision':      precision_score(y_true=target, y_pred=pred, average='micro'),
+            'micro/recall':         recall_score(y_true=target, y_pred=pred, average='micro'),
+            'micro/f1':             f1_score(y_true=target, y_pred=pred, average='micro'),
+            'samples/precision':    precision_score(y_true=target, y_pred=pred, average='samples'),
+            'samples/recall':       recall_score(y_true=target, y_pred=pred, average='samples'),
+            'samples/f1':           f1_score(y_true=target, y_pred=pred, average='samples'),
+            'macro/precision':      precision_score(y_true=target, y_pred=pred, average=None),
+            'macro/recall':         recall_score(y_true=target, y_pred=pred, average=None),
+            'macro/f1':             f1_score(y_true=target, y_pred=pred, average=None),
+            }
 
 #train it.
 def train(args, Dtr, Val, path):
@@ -341,7 +354,11 @@ def train(args, Dtr, Val, path):
         optimizer = torch.optim.SGD(model.parameters(), lr=args['lr'],momentum=0.9, weight_decay=args['weight_decay'])
         
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args['step_size'], gamma=args['gamma'])
-    
+
+    if os.path.exists(path):
+        print('loading models...')
+        model.load_state_dict(torch.load(path)['models'])
+
     # training
     best_model = None
     train_loss_all=[]
@@ -370,11 +387,15 @@ def train(args, Dtr, Val, path):
         # validation
         val_loss=0
         num_item=0
+        targets = []
+        model_result = []
         model.eval()
         for (seq, label) in Val:
             seq = seq.to(device)
             label = label.to(device)
             y_pred = model(seq)
+            model_result.extend( y_pred.detach().cpu().numpy() )
+            targets.extend( label.detach().cpu().numpy() )
             loss = loss_function(y_pred, label)
             val_loss+=loss.item()*len(y_pred)
             num_item+=len(y_pred)
@@ -388,7 +409,12 @@ def train(args, Dtr, Val, path):
             best_loss=val_loss_all[-1]
             best_model=copy.deepcopy(model)        
 
-        print('epoch {:03d} train_loss {:.8f} val_loss {:.8f}'.format(epoch, train_loss_all[-1], val_loss_all[-1]))
+        result = calculate_metrics(np.array(model_result), np.array(targets))
+        for key in result:
+            print(key)
+            print(result[key])
+        print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f}'.format(epoch, train_loss_all[-1], val_loss_all[-1]))
+
     #save the best model.
     state = {'models': best_model.state_dict()}
     torch.save(state, path)
