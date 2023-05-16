@@ -154,7 +154,7 @@ def process(data, batch_size, shuffle,data_index_set):
     return seq
 
 # Create dataset.
-def process_bk(data, batch_size, shuffle,data_index_set):
+def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
     args=get_args()
     seq_len=get_args()["seq_len"]
     steps=args["multi_steps"]
@@ -179,9 +179,15 @@ def process_bk(data, batch_size, shuffle,data_index_set):
             train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
             train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
             seq.append((train_seq_ts, train_label_ts))
+    if test_pred == True:
+        last_seq_ts = torch.FloatTensor(train_seqs[-seq_len:])
+        seq.append((last_seq_ts, train_label_ts))
+        print("fixme if step more than 1")
+    else:
+        last_seq_ts = None
     seq = MyDataset(seq)
-    seq = DataLoader(dataset=seq, batch_size=batch_size, shuffle=shuffle, num_workers=0, drop_last=True)
-    return seq
+    seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred))
+    return seq, last_seq_ts
 
 # split date and create datasets for train /validate and test.
 def nn_bkdata_seq(batch_size, lstmtype):
@@ -213,15 +219,17 @@ def nn_bkdata_seq(batch_size, lstmtype):
 
     #dataset.
     if lstmtype == "BiLSTM" or lstmtype == "LSTM":
-        Dtr = process_bk(train, batch_size, True,data_index_set)
-        Val = process_bk(val,   batch_size, True,data_index_set)
-        Dte = process_bk(test,  batch_size, False,data_index_set)
+        Dtr, _ = process_bk(train, batch_size, True,data_index_set)
+        Val, _ = process_bk(val,   batch_size, True,data_index_set)
+        Dte, last_seq_ts = process_bk(test,  batch_size, False,data_index_set, test_pred=True)
     else:
         Dtr = process_bkMultiLabel(train, batch_size, True,data_index_set)
         Val = process_bkMultiLabel(val,   batch_size, True,data_index_set)
         Dte = process_bkMultiLabel(test,  batch_size, False,data_index_set)
+        last_seq_ts = None
+        print("fixme last_seq_ts")
 
-    return Dtr, Val, Dte
+    return Dtr, Val, Dte, last_seq_ts, test
 
 # split date and create datasets for train /validate and test.
 def nn_data_seq(batch_size):
@@ -342,6 +350,20 @@ def calculate_metrics(pred, target, threshold=0.5):
             'macro/f1':             f1_score(y_true=target, y_pred=pred, average=None),
             }
 
+def topn_rank(model_result, targets, topn=1):
+    algs=get_args()
+    num = 0
+    rankAva = 0
+    for idx in range(len(model_result)-algs["multi_steps"]):
+        # maxIdx = model_result[idx].argmax()
+        topnidx = model_result[idx].argsort()[-topn]
+        ranks = targets[idx].argsort().argsort()
+        rank = np.take(ranks, topnidx).mean()
+        # rank = ranks.mean()
+        rankAva += rank
+        num += 1
+    print(f"\nTop {topn} Average Rank is:", int(rankAva/num), flush=True)
+
 #train it.
 def train(args, Dtr, Val, path):
     args=get_args()
@@ -374,6 +396,10 @@ def train(args, Dtr, Val, path):
     train_loss_all=[]
     val_loss_all=[]
     best_loss=1e+10
+    # initialize the early_stopping object
+    # early_stopping = EarlyStopping(patience=TCH_EARLYSTOP_PATIENCE, verbose=True)
+    patience = 0
+
     print('training...')
     for epoch in tqdm(range(args['epochs'])):
         train_loss = 0
@@ -421,6 +447,17 @@ def train(args, Dtr, Val, path):
             state = {'models': best_model.state_dict()}
             print('Saving models...')
             torch.save(state, path)
+            patience = 0
+        elif val_loss_all[-1]>best_loss:
+            patience += 1
+            if patience > TCH_EARLYSTOP_PATIENCE:
+                break
+
+        # early_stopping(val_loss, model)
+        #
+        # if early_stopping.early_stop:
+        #     print("Early stopping")
+        #     break
 
         if args["type"] == "MultiLabelLSTM":
             result = calculate_metrics(np.array(model_result), np.array(targets))
@@ -428,16 +465,19 @@ def train(args, Dtr, Val, path):
                 print(key)
                 print(result[key])
         else:
-            num = 0
-            rankAva = 0
-            for idx in range(len(model_result)):
-                maxIdx = model_result[idx].argmax()
-                ranks = targets[idx].argsort().argsort()
-                rank = np.take(ranks, maxIdx).mean()
-                # rank = ranks.mean()
-                rankAva += rank
-                num += 1
-            print("\nAverage Rank is:", int(rankAva/num))
+            # num = 0
+            # rankAva = 0
+            # for idx in range(len(model_result)):
+            #     maxIdx = model_result[idx].argmax()
+            #     ranks = targets[idx].argsort().argsort()
+            #     rank = np.take(ranks, maxIdx).mean()
+            #     # rank = ranks.mean()
+            #     rankAva += rank
+            #     num += 1
+            # print("\nAverage Rank is:", int(rankAva/num))
+            topn_rank(model_result, targets, 1)
+            topn_rank(model_result, targets, 2)
+            topn_rank(model_result, targets, 3)
 
             # num = 0
             # rankAva = 0
@@ -454,7 +494,7 @@ def train(args, Dtr, Val, path):
             # print("\nAverage Rank is:", int(rankAva/num))
 
 
-        print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f}'.format(epoch, train_loss_all[-1], val_loss_all[-1]))
+        print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss), flush=True)
 
     #save the best model.
     state = {'models': best_model.state_dict()}
@@ -478,16 +518,16 @@ def train(args, Dtr, Val, path):
 
     
 #validate
-def test(args, Dte, path,data_pred_index):
+def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
     
-    m=[];n=[]
-    mn=get_data_maxmin(data_pred_index)
-    if(type(mn).__name__=="list"):
-        for i in range(len(mn)):
-            m.append(mn[i]["max"]);n.append(mn[i]["min"])
-    else:
-        m.append(mn["max"]);n.append(mn["min"])   
-    m=np.array(m);n=np.array(n)         
+    # m=[];n=[]
+    # mn=get_data_maxmin(data_pred_index)
+    # if(type(mn).__name__=="list"):
+    #     for i in range(len(mn)):
+    #         m.append(mn[i]["max"]);n.append(mn[i]["min"])
+    # else:
+    #     m.append(mn["max"]);n.append(mn["min"])
+    # m=np.array(m);n=np.array(n)
         
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
@@ -496,7 +536,7 @@ def test(args, Dte, path,data_pred_index):
     if args['type'] == "BiLSTM": #lstm, bidirection-lstm, multilabel-lstm
         model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
     elif args['type'] == "LSTM":
-        model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
+        model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     else:
         model = MultiLabelLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
 
@@ -505,12 +545,12 @@ def test(args, Dte, path,data_pred_index):
     
     model.eval()
     print('predicting...')
-    if args['pred_type']=="all":
+    if args['pred_type']=="all" and False:
         pred=np.empty(shape=(0,4))
         y=np.empty(shape=(0,4))
     else:
-        pred=np.empty(shape=(0,1))
-        y=np.empty(shape=(0,1))
+        pred=np.empty(shape=(0,args["output_size"]))
+        y=np.empty(shape=(0,args["output_size"]))
     for (seq, target) in tqdm(Dte):
         y=np.append(y,target.numpy(),axis=0)
         seq = seq.to(device)
@@ -518,27 +558,36 @@ def test(args, Dte, path,data_pred_index):
             y_pred = model(seq)
             pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
 
-    y = (m - n) * y + n
-    pred = (m - n) * pred + n
-    mape=get_mape(y, pred)
-    print("mape:%.2f%% with pred_type: %s price multi_steps: %d" %(mape,args['pred_type'],args['multi_steps']))
+    topn_rank(y, pred, 1)
+    topn_rank(y, pred, 2)
+    topn_rank(y, pred, 3)
+
+    last_pred = y_pred.cpu().numpy()[0]
+    top3idx = last_pred.argsort()[-3]
+    top3mask = last_pred>=last_pred[top3idx]
+    print("top3", testdf.loc[testdf.index[-1][0]].index.get_level_values(1)[top3mask])
+
+    # y = (m - n) * y + n
+    # pred = (m - n) * pred + n
+    # mape=get_mape(y, pred)
+    # print("mape:%.2f%% with pred_type: %s price multi_steps: %d" %(mape,args['pred_type'],args['multi_steps']))
     
     #add module info to result dict.
-    result['filename']=path
-    result['datetime']=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    result['pred_type']=args['pred_type']
-    result['multi_steps']=args['multi_steps']
-    result['input_para_num']=str(data_index_set)
-    result['mape']="%0.2f%%"%mape    
-    #write module info to json file
-    path_tmp=path.replace('.pkl','.json')
-    json_file=open(path_tmp, mode='w+')
-    json_str=json.dumps(result);
-    json_file.write(json_str)
-    json_file.close()
+    # result['filename']=path
+    # result['datetime']=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    # result['pred_type']=args['pred_type']
+    # result['multi_steps']=args['multi_steps']
+    # result['input_para_num']=str(data_index_set)
+    # result['mape']="%0.2f%%"%mape
+    # #write module info to json file
+    # path_tmp=path.replace('.pkl','.json')
+    # json_file=open(path_tmp, mode='w+')
+    # json_str=json.dumps(result);
+    # json_file.write(json_str)
+    # json_file.close()
     
     # plot for pred.
-    if plot :
+    if plot and False:
         x = [i for i in range(1, len(pred)+1)]
         x_smooth = np.linspace(np.min(x), np.max(x), 1000)
         y_model=make_interp_spline(x, y)
@@ -564,13 +613,14 @@ if __name__ == '__main__' :
     #batch_size should be 5-8 for sinble parameters pridiction and 100 for multi-parameter prediction.
     #xxx_begin and xxx_end for data split, can be modified per yourslef.
     args={
-          "input_size":len(data_index_set), #number of input parameters used in predition. you can modify it in data index list.
-          "hidden_size":64,#number of cells in one hidden layer.
-          "num_layers":1,  #number of hidden layers in predition module.
-          "output_size":58, #number of parameter will be predicted.
-          "lr":0.001,
+          "input_size":BK_SIZE*len(COLS), #number of input parameters used in predition. you can modify it in data index list.
+          "hidden_size":int(BK_SIZE*len(COLS)*1.3),#number of cells in one hidden layer.
+          "num_layers":3,  #number of hidden layers in predition module.
+          "output_size":BK_SIZE, #number of parameter will be predicted.
+          "lr":3e-4,
           "weight_decay":0.0001,
           "bidirectional":False,
+          "type": "LSTM", # BiLSTM, LSTM, MultiLabelLSTM
           "optimizer":"adam",
           "step_size":5,
           "gamma":0.5,
@@ -618,9 +668,9 @@ if __name__ == '__main__' :
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA or CPU:", device)
     #load data to a dataFrame.
-    Dtr, Val, Dte = nn_bkdata_seq(args['batch_size'], args['type'])
+    Dtr, Val, Dte, last_seq_ts, testdf = nn_bkdata_seq(args['batch_size'], args['type'])
     #train it.
     train(args, Dtr, Val, path_file)
     #teest it.
-    test(args, Dte, path_file, data_pred_index)
+    test(args, Dte, path_file, data_pred_index, last_seq_ts, testdf)
     
