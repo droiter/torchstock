@@ -229,14 +229,14 @@ def nn_bkdata_seq(batch_size, lstmtype):
         log.output("number data in %s is too less, can not train model." %data_file_name,level=1)
         sys.exit(0) #can not find the data file.
     else:
-        algs["train_end"]=0.95
-        algs["val_begin"]=0.1
-        algs["val_end"]=0.95
-        algs["test_begin"]=0.1
+        algs["train_end"]=0.6
+        algs["val_begin"]=0.6
+        algs["val_end"]=0.8
+        algs["test_begin"]=0.8
     # split
-    train = dataset[:int(len(dataset)/BK_SIZE * algs["train_end"])*BK_SIZE]
-    val  = dataset[int(len(dataset)/BK_SIZE * algs["val_begin"]*BK_SIZE):int(len(dataset)/BK_SIZE * algs["val_end"])*BK_SIZE]
-    test = dataset[int(len(dataset)/BK_SIZE * algs["test_begin"])*BK_SIZE:len(dataset)]
+    train = dataset.iloc[:int(len(dataset.index)/BK_SIZE * algs["train_end"])*BK_SIZE]
+    val  = dataset.iloc[int(len(dataset.index)/BK_SIZE * algs["val_begin"])*BK_SIZE:int(len(dataset.index)/BK_SIZE * algs["val_end"])*BK_SIZE]
+    test = dataset.iloc[int(len(dataset.index)/BK_SIZE * algs["test_begin"])*BK_SIZE:len(dataset.index)]
     for i in range(data_col_bypass,dataset.shape[1]):
         m, n = np.max(dataset[dataset.columns[i]]), np.min(dataset[dataset.columns[i]])
         mm={}
@@ -592,7 +592,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
     last_pred = y_pred.cpu().numpy()[0]
     top3idx = last_pred.argsort()[-3]
     top3mask = last_pred>=last_pred[top3idx]
-    print("top3", testdf.loc[testdf.index[-1][0]].index.get_level_values(1)[top3mask])
+    print("predict top3 at", testdf.index[-1][0], testdf.loc[testdf.index[-1][0]].index.get_level_values(1)[top3mask])
 
     # y = (m - n) * y + n
     # pred = (m - n) * pred + n
@@ -697,7 +697,8 @@ if __name__ == '__main__' :
     #load data to a dataFrame.
     Dtr, Val, Dte, last_seq_ts, testdf = nn_bkdata_seq(args['batch_size'], args['type'])
     #train it.
-    train(args, Dtr, Val, path_file)
+    if ONLY_PREDICT == False:
+        train(args, Dtr, Val, path_file)
     #teest it.
     test(args, Dte, path_file, data_pred_index, last_seq_ts, testdf)
     
