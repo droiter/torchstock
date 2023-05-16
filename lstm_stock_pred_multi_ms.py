@@ -150,6 +150,33 @@ def process(data, batch_size, shuffle,data_index_set):
         train_label = torch.FloatTensor(train_label).view(-1)
         seq.append((train_seq, train_label)) 
     seq = MyDataset(seq)
+    seq = DataLoader(dataset=seq, batch_size=batch_size, shuffle=shuffle, num_workers=2, drop_last=True)
+    return seq
+
+# Create dataset.
+def process_bkMultiLabel(data, batch_size, shuffle,data_index_set):
+    args=get_args()
+    seq_len=get_args()["seq_len"]
+    steps=args["multi_steps"]
+
+    seq = []
+    train_seqs = []
+    train_labels = []
+    predstep = steps + seq_len
+    dataLen = 0
+    for date in data.index.get_level_values("date").unique():
+        train_seq = data.loc[date].to_numpy().flatten().tolist()
+        close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+        train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+        train_seqs += [train_seq]
+        train_labels += [train_label]
+
+        dataLen += 1
+        if dataLen >= predstep:
+            train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+            train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
+            seq.append((train_seq_ts, train_label_ts))
+    seq = MyDataset(seq)
     seq = DataLoader(dataset=seq, batch_size=batch_size, shuffle=shuffle, num_workers=0, drop_last=True)
     return seq
 
