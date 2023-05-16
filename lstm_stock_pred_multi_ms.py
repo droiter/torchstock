@@ -159,6 +159,8 @@ def process_bk(data, batch_size, shuffle,data_index_set):
     seq_len=get_args()["seq_len"]
     steps=args["multi_steps"]
 
+    data = data.loc[:, COLS]
+
     seq = []
     train_seqs = []
     train_labels = []
@@ -166,8 +168,9 @@ def process_bk(data, batch_size, shuffle,data_index_set):
     dataLen = 0
     for date in data.index.get_level_values("date").unique():
         train_seq = data.loc[date].to_numpy().flatten().tolist()
-        close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
-        train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+        # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+        # train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+        train_label = data.loc[date, "close"].to_numpy().flatten().tolist()
         train_seqs += [train_seq]
         train_labels += [train_label]
 
@@ -181,7 +184,7 @@ def process_bk(data, batch_size, shuffle,data_index_set):
     return seq
 
 # split date and create datasets for train /validate and test.
-def nn_bkdata_seq(batch_size):
+def nn_bkdata_seq(batch_size, lstmtype):
     print('data processing...')
     data_file_name = "bkidx.hdf"
     dataset = load_bkdata(data_file_name)
@@ -209,9 +212,14 @@ def nn_bkdata_seq(batch_size):
         data_mm.append(mm)
 
     #dataset.
-    Dtr = process_bk(train, batch_size, True,data_index_set)
-    Val = process_bk(val,   batch_size, True,data_index_set)
-    Dte = process_bk(test,  batch_size, False,data_index_set)
+    if lstmtype == "BiLSTM" or lstmtype == "LSTM":
+        Dtr = process_bk(train, batch_size, True,data_index_set)
+        Val = process_bk(val,   batch_size, True,data_index_set)
+        Dte = process_bk(test,  batch_size, False,data_index_set)
+    else:
+        Dtr = process_bkMultiLabel(train, batch_size, True,data_index_set)
+        Val = process_bkMultiLabel(val,   batch_size, True,data_index_set)
+        Dte = process_bkMultiLabel(test,  batch_size, False,data_index_set)
 
     return Dtr, Val, Dte
 
@@ -340,13 +348,15 @@ def train(args, Dtr, Val, path):
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
     output_size = args['output_size']
     
-    if args['bidirectional']:
+    if args["type"] == 'BiLSTM':
         model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
+        loss_function = nn.MSELoss().to(device)
+    elif args["type"] == 'LSTM':
+        model = LSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
+        loss_function = nn.MSELoss().to(device)
     else:
         model = MultiLabelLSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
-
-    # loss_function = nn.MSELoss().to(device)
-    loss_function = nn.BCELoss().to(device)
+        loss_function = nn.BCELoss().to(device)
 
     if args['optimizer'] == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), lr=args['lr'],weight_decay=args['weight_decay'])
@@ -408,11 +418,42 @@ def train(args, Dtr, Val, path):
         if(val_loss_all[-1]<best_loss):
             best_loss=val_loss_all[-1]
             best_model=copy.deepcopy(model)        
+            state = {'models': best_model.state_dict()}
+            print('Saving models...')
+            torch.save(state, path)
 
-        result = calculate_metrics(np.array(model_result), np.array(targets))
-        for key in result:
-            print(key)
-            print(result[key])
+        if args["type"] == "MultiLabelLSTM":
+            result = calculate_metrics(np.array(model_result), np.array(targets))
+            for key in result:
+                print(key)
+                print(result[key])
+        else:
+            num = 0
+            rankAva = 0
+            for idx in range(len(model_result)):
+                maxIdx = model_result[idx].argmax()
+                ranks = targets[idx].argsort().argsort()
+                rank = np.take(ranks, maxIdx).mean()
+                # rank = ranks.mean()
+                rankAva += rank
+                num += 1
+            print("\nAverage Rank is:", int(rankAva/num))
+
+            # num = 0
+            # rankAva = 0
+            # for (seq, label) in Val:
+            #     seq = seq.to(device)
+            #     label = label.to(device)
+            #     y_pred = model(seq)
+            #     maxIdx = y_pred.detach().cpu().numpy().argmax(axis=1)
+            #     ranks = label.detach().cpu().numpy().argsort().argsort()
+            #     rank = np.take(ranks, maxIdx).mean()
+            #     # rank = ranks.mean()
+            #     rankAva += rank
+            #     num += 1
+            # print("\nAverage Rank is:", int(rankAva/num))
+
+
         print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f}'.format(epoch, train_loss_all[-1], val_loss_all[-1]))
 
     #save the best model.
@@ -452,11 +493,13 @@ def test(args, Dte, path,data_pred_index):
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
     output_size = args['output_size']
     
-    if args['bidirectional']:
+    if args['type'] == "BiLSTM": #lstm, bidirection-lstm, multilabel-lstm
         model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
-    else:
+    elif args['type'] == "LSTM":
         model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
-        
+    else:
+        model = MultiLabelLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
+
     print('loading models...')
     model.load_state_dict(torch.load(path)['models'])
     
@@ -551,28 +594,31 @@ if __name__ == '__main__' :
     if pred_type =="all" :
         args["output_size"]=4   #for open / close /high/low.
 
+    torch.set_num_threads(os.cpu_count()-1)
+
     #Data max min.
     data_mm=[]
     #module description in json
     result={}
     #stock data file in csv
     #data_file_name="guizhoumaotai600519" 
-    data_file_name="" 
-    temp_name=find_data_file(stock_id)
-    if temp_name != None :
-        data_file_name=temp_name[:-4] #remove the .csv in filename. 
-        print("%s 's model will be calcuated." %data_file_name)
-    else:
-        print("can not find data file for stock: %s !" %stock_id)
-        log.output("can not find data file for stock: %s !" %stock_id, level=1)
-        sys.exit(0) #can not find the data file.      
+    # data_file_name=""
+    # temp_name=find_data_file(stock_id)
+    # if temp_name != None :
+    #     data_file_name=temp_name[:-4] #remove the .csv in filename.
+    #     print("%s 's model will be calcuated." %data_file_name)
+    # else:
+    #     print("can not find data file for stock: %s !" %stock_id)
+    #     log.output("can not find data file for stock: %s !" %stock_id, level=1)
+    #     sys.exit(0) #can not find the data file.
     #save module data to file in the path.
-    path_file='./model/'+'module'+ '-'+ data_file_name +'-'+pred_type+'-0'+ str(args['multi_steps']) +'.pkl' #Module for the next "x" day's stock price prediction.
+    # path_file='./model/'+'module'+ '-'+ data_file_name +'-'+pred_type+'-0'+ str(args['multi_steps']) +'.pkl' #Module for the next "x" day's stock price prediction.
     #test cuda
+    path_file='./model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl' #Module for the next "x" day's stock price prediction.
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA or CPU:", device)
     #load data to a dataFrame.
-    Dtr, Val, Dte = nn_bkdata_seq(args['batch_size'])
+    Dtr, Val, Dte = nn_bkdata_seq(args['batch_size'], args['type'])
     #train it.
     train(args, Dtr, Val, path_file)
     #teest it.
