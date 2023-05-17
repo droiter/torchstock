@@ -197,7 +197,11 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
         train_seq = data.loc[date].to_numpy().flatten().tolist()
         # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
         # train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
-        train_label = data.loc[date, "close"].to_numpy().flatten().tolist()
+        if args["type"] != "MultiLabelLSTM":
+            train_label = data.loc[date, "close"].to_numpy().flatten().tolist()
+        else:
+            close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
         train_seqs += [train_seq]
         train_labels += [train_label]
 
@@ -246,14 +250,14 @@ def nn_bkdata_seq(batch_size, lstmtype):
         data_mm.append(mm)
 
     #dataset.
-    if lstmtype == "BiLSTM" or lstmtype == "LSTM":
+    if lstmtype == "BiLSTM" or lstmtype == "LSTM" or True:
         Dtr, _ = process_bk(train, batch_size, True,data_index_set)
         Val, _ = process_bk(val,   batch_size, True,data_index_set)
         Dte, last_seq_ts = process_bk(test,  batch_size, False,data_index_set, test_pred=True)
     else:
         Dtr = process_bkMultiLabel(train, batch_size, True,data_index_set)
         Val = process_bkMultiLabel(val,   batch_size, True,data_index_set)
-        Dte = process_bkMultiLabel(test,  batch_size, False,data_index_set)
+        Dte = process_bkMultiLabel(test,  batch_size, False,data_index_set, test_pred=True)
         last_seq_ts = None
         print("fixme last_seq_ts")
 
@@ -382,7 +386,7 @@ def topn_rank(model_result, targets, topn=1):
     algs=get_args()
     num = 0
     rankAva = 0
-    for idx in range(len(model_result)-algs["multi_steps"]):
+    for idx in range(len(model_result)):
         # maxIdx = model_result[idx].argmax()
         topnidx = model_result[idx].argsort()[-topn]
         ranks = targets[idx].argsort().argsort()
@@ -390,7 +394,7 @@ def topn_rank(model_result, targets, topn=1):
         # rank = ranks.mean()
         rankAva += rank
         num += 1
-    print(f"\nTop {topn} Average Rank is:", int(rankAva/num), flush=True)
+    print(f"\nTop {topn} Average Rank is:", (rankAva/num), flush=True)
 
 #train it.
 def train(args, Dtr, Val, path):
@@ -562,11 +566,11 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
     output_size = args['output_size']
     
     if args['type'] == "BiLSTM": #lstm, bidirection-lstm, multilabel-lstm
-        model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
+        model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     elif args['type'] == "LSTM":
         model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     else:
-        model = MultiLabelLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
+        model = MultiLabelLSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
 
     print('loading models...')
     model.load_state_dict(torch.load(path)['models'])
@@ -579,21 +583,31 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
     else:
         pred=np.empty(shape=(0,args["output_size"]))
         y=np.empty(shape=(0,args["output_size"]))
+    targets = []
+    model_result = []
     for (seq, target) in tqdm(Dte):
         y=np.append(y,target.numpy(),axis=0)
         seq = seq.to(device)
         with torch.no_grad():
             y_pred = model(seq)
             pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
+            model_result.extend( y_pred.detach().cpu().numpy() )
+            targets.extend( target.detach().cpu().numpy() )
 
-    topn_rank(y, pred, 1)
-    topn_rank(y, pred, 2)
-    topn_rank(y, pred, 3)
+    if args["type"] == "MultiLabelLSTM":
+        result = calculate_metrics(np.array(model_result)[:-args["multi_steps"]], np.array(targets)[:-args["multi_steps"]])
+        for key in result:
+            print(key)
+            print(result[key])
+    else:
+        topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 1)
+        topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 2)
+        topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 3)
 
-    last_pred = y_pred.cpu().numpy()[0]
-    top3idx = last_pred.argsort()[-3]
-    top3mask = last_pred>=last_pred[top3idx]
-    print("predict top3 at", testdf.index[-1][0], testdf.loc[testdf.index[-1][0]].index.get_level_values(1)[top3mask])
+        last_pred = y_pred.cpu().numpy()[0]
+        top3idx = last_pred.argsort()[-3]
+        top3mask = last_pred>=last_pred[top3idx]
+        print("predict top3 at", testdf.index[-1][0], testdf.loc[testdf.index[-1][0]].index.get_level_values(1)[top3mask])
 
     # y = (m - n) * y + n
     # pred = (m - n) * pred + n
