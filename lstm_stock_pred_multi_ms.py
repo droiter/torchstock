@@ -186,7 +186,7 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
     seq_len=get_args()["seq_len"]
     steps=args["multi_steps"]
 
-    data = data.loc[:, COLS]
+    #data = data.loc[:, COLS]
 
     seq = []
     train_seqs = []
@@ -213,7 +213,7 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
     else:
         last_seq_ts = None
     seq = MyDataset(seq)
-    seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred))
+    seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=2, drop_last=(not test_pred))
     return seq, last_seq_ts
 
 # split date and create datasets for train /validate and test.
@@ -221,6 +221,7 @@ def nn_bkdata_seq(batch_size, lstmtype):
     print('data processing...')
     data_file_name = "bkidx.hdf"
     dataset = load_bkdata(data_file_name)
+    dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
 
     algs=get_args()
     #check number of data items in df, if it is too less , we can not train it.
@@ -521,7 +522,7 @@ def train(args, Dtr, Val, path):
             # print("\nAverage Rank is:", int(rankAva/num))
 
 
-        print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss), flush=True)
+        print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, patience), flush=True)
 
     #save the best model.
     state = {'models': best_model.state_dict()}
