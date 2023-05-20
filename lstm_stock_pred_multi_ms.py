@@ -20,7 +20,14 @@ import lstm_stock_log as log
 import math
 from sklearn.metrics import precision_score, recall_score, f1_score
 
-BK_SIZE = 58
+BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '880335', '880344', '880350', '880351', '880355', '880360', '880367', '880372', '880380', '880387', '880390', '880398', '880399', '880400', '880406', '880414', '880418', '880421', '880422', '880423', '880424', '880430', '880431', '880432', '880437', '880440', '880446', '880447', '880448', '880452', '880453', '880454', '880455', '880456', '880459', '880464', '880465', '880471', '880472', '880473', '880474', '880476', '880482', '880489', '880490', '880491', '880492', '880493', '880494', '880497', '399001']
+
+#BKS = ["000001", "880367", "399001"]
+BK_SIZE = len(BKS)
+BK_TOPN = 10
+COLS = ["open", "close", "high", "low", "vol"]
+TCH_EARLYSTOP_PATIENCE = 200
+ONLY_PREDICT = False
 
 #cmd line parmeters.
 def cmd_line():
@@ -208,7 +215,8 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
         dataLen += 1
         if dataLen >= predstep:
             train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
-            train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
+            # train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
+            train_label_ts = torch.FloatTensor(np.array(train_labels)[-steps:].sum(axis=0)).view(-1)
             seq.append((train_seq_ts, train_label_ts))
     if test_pred == True:
         last_seq_ts = torch.FloatTensor(train_seqs[-seq_len:])
