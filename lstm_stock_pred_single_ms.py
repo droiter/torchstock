@@ -19,16 +19,19 @@ import sys
 import lstm_stock_log as log
 import math
 from sklearn.metrics import precision_score, recall_score, f1_score
+from torchsampler import ImbalancedDatasetSampler
+import pickle
 # from pytorchtools import EarlyStopping
 
 BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '880335', '880344', '880350', '880351', '880355', '880360', '880367', '880372', '880380', '880387', '880390', '880398', '880399', '880400', '880406', '880414', '880418', '880421', '880422', '880423', '880424', '880430', '880431', '880432', '880437', '880440', '880446', '880447', '880448', '880452', '880453', '880454', '880455', '880456', '880459', '880464', '880465', '880471', '880472', '880473', '880474', '880476', '880482', '880489', '880490', '880491', '880492', '880493', '880494', '880497', '399001']
 
 #BKS = ["000001", "880367", "399001"]
-BK_SIZE = len(BKS)
+BK_SIZE = 1 #len(BKS)
 BK_TOPN = 10
 COLS = ["open", "close", "high", "low", "vol"]
 TCH_EARLYSTOP_PATIENCE = 200
 ONLY_PREDICT = False
+CLOSE_LABEL_THRESHOLD = 0.94
 
 #cmd line parmeters.
 def cmd_line():
@@ -116,16 +119,34 @@ def load_data(file_name):
     #df=df.reindex(index=df.index[::-1])    
     return df 
 
+def load_stocks_data(file_name):
+    df = pd.read_hdf("rlcalc.hdf", "rlcalc")
+    df = df.reset_index().set_index(["exchange", "code", "date"]).sort_index()
+    df = df.loc[df.index.get_level_values("date") > "2012-1-1"]
+    # print(df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"))
+    # print(df.loc[(df<-1.0).any(axis=1)].index.get_level_values("code"))
+    for code in df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"):
+        print(code)
+        df = df.loc[df.index.get_level_values("code")!=code]
+    for code in df.loc[(df<-1.0).any(axis=1)].index.get_level_values("code"):
+        print(code)
+        df = df.loc[df.index.get_level_values("code")!=code]
+    return df
+
 #create our dataset.
 class MyDataset(Data.Dataset):
     def __init__(self, data):
         self.data = data
+        self.labels = [ x[1].item() for x in data ]
 
     def __getitem__(self, item):
         return self.data[item]
 
     def __len__(self):
         return len(self.data)
+
+    def get_labels(self):
+        return self.labels
     
 # Create dataset.   
 def process(data, batch_size, shuffle,data_index_set):
@@ -190,6 +211,67 @@ def process_bkMultiLabel(data, batch_size, shuffle,data_index_set):
     return seq
 
 # Create dataset.
+def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
+    args=get_args()
+
+    seq_pkl_name = "torch_stock_seq" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl'
+    last_pkl_name = "torch_stock_last" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl'
+
+    if os.path.exists(seq_pkl_name):
+        return pickle.load(seq_pkl_name), pickle.load(last_pkl_name)
+
+    seq_len=get_args()["seq_len"]
+    steps=args["multi_steps"]
+    dataAll = dataAll.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
+
+    dataAll = dataAll.loc[:, COLS]
+    dataAll = dataAll.loc[dataAll.index.get_level_values("code") < "300000"] #"300000"
+
+    predstep = steps + seq_len
+    seq = []
+
+    for code in dataAll.index.get_level_values("code").unique():
+        data = dataAll.loc[("szse", code)].sort_index()
+        print("code", code)
+        train_seqs = []
+        train_labels = []
+        dataLen = 0
+
+        for date in data.index.get_level_values("date").unique().sort_values():
+            train_seq = data.loc[date].to_numpy().flatten().tolist()
+            # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            # train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            # if args["type"] != "MultiLabelLSTM":
+            #     train_label = data.loc[date, "close"].to_numpy().flatten().tolist()
+            # else:
+            #     close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            train_seqs += [train_seq]
+            train_labels += [[data.loc[date, "close"]]]
+
+            dataLen += 1
+            if dataLen >= predstep:
+                train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                # train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
+                train_label_ts = torch.FloatTensor(np.array(train_labels)[-steps:].sum(axis=0)).view(-1)
+                seq.append((train_seq_ts, train_label_ts))
+    if test_pred == True and False:
+        last_seq_ts = torch.FloatTensor(train_seqs[-seq_len:])
+        seq.append((last_seq_ts, train_label_ts))
+        print("fixme if step more than 1")
+    else:
+        last_seq_ts = None
+    seq = MyDataset(seq)
+    if args["type"] == "MultiLabelLSTM":
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(seq), num_workers=2, drop_last=(not test_pred)) #shuffle=shuffle,
+    else:
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=2, drop_last=(not test_pred)) #shuffle=shuffle,
+
+    pickle.dump(seq, seq_pkl_name)
+    pickle.dump(last_seq_ts, last_pkl_name)
+    return seq, last_seq_ts
+
+# Create dataset.
 def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
     args=get_args()
     seq_len=get_args()["seq_len"]
@@ -229,6 +311,48 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
     seq = MyDataset(seq)
     seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=2, drop_last=(not test_pred))
     return seq, last_seq_ts
+
+# split date and create datasets for train /validate and test.
+def nn_stocksdata_seq(batch_size, lstmtype):
+    print('data processing...')
+    data_file_name = "rlcalc.hdf"
+    dataset = load_stocks_data(data_file_name)
+    # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
+
+    algs=get_args()
+    #check number of data items in df, if it is too less , we can not train it.
+    algs["train_end"]=0.7
+    algs["val_begin"]=0.7
+    algs["val_end"]=0.9
+    algs["test_begin"]=0.9
+    print("fixme algs")
+
+    dates = dataset.index.get_level_values("date").unique().sort_values()
+
+    all_code_len = len(dates)
+    train_date_end = dates[int(all_code_len*algs["train_end"])]
+    train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
+    val_date_end = dates[int(all_code_len*algs["val_end"])]
+    val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
+    test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
+
+    # # split
+    # # train = dataset.iloc[:int(len(dataset.index)/BK_SIZE * algs["train_end"])*BK_SIZE]
+    # # val  = dataset.iloc[int(len(dataset.index)/BK_SIZE * algs["val_begin"])*BK_SIZE:int(len(dataset.index)/BK_SIZE * algs["val_end"])*BK_SIZE]
+    # # test = dataset.iloc[int(len(dataset.index)/BK_SIZE * algs["test_begin"])*BK_SIZE:len(dataset.index)]
+    # for i in range(data_col_bypass,dataset.shape[1]):
+    #     m, n = np.max(dataset[dataset.columns[i]]), np.min(dataset[dataset.columns[i]])
+    #     mm={}
+    #     mm['max']=m
+    #     mm['min']=n
+    #     data_mm.append(mm)
+
+    #dataset.
+    Dtr, _ = process_stocks(train, batch_size, True,data_index_set)
+    Val, _ = process_stocks(val,   batch_size, True,data_index_set)
+    Dte, last_seq_ts = process_stocks(test,  batch_size, False,data_index_set, test_pred=True)
+
+    return Dtr, Val, Dte, last_seq_ts, test
 
 # split date and create datasets for train /validate and test.
 def nn_bkdata_seq(batch_size, lstmtype):
@@ -384,9 +508,9 @@ def calculate_metrics(pred, target, threshold=0.5):
     return {'micro/precision':      precision_score(y_true=target, y_pred=pred, average='micro'),
             'micro/recall':         recall_score(y_true=target, y_pred=pred, average='micro'),
             'micro/f1':             f1_score(y_true=target, y_pred=pred, average='micro'),
-            'samples/precision':    precision_score(y_true=target, y_pred=pred, average='samples'),
-            'samples/recall':       recall_score(y_true=target, y_pred=pred, average='samples'),
-            'samples/f1':           f1_score(y_true=target, y_pred=pred, average='samples'),
+            # 'samples/precision':    precision_score(y_true=target, y_pred=pred, average='samples'),
+            # 'samples/recall':       recall_score(y_true=target, y_pred=pred, average='samples'),
+            # 'samples/f1':           f1_score(y_true=target, y_pred=pred, average='samples'),
             'macro/precision':      precision_score(y_true=target, y_pred=pred, average=None),
             'macro/recall':         recall_score(y_true=target, y_pred=pred, average=None),
             'macro/f1':             f1_score(y_true=target, y_pred=pred, average=None),
@@ -437,7 +561,7 @@ def train(args, Dtr, Val, path):
     best_model = None
     train_loss_all=[]
     val_loss_all=[]
-    best_loss=1e+10
+    best_loss=None
     # initialize the early_stopping object
     # early_stopping = EarlyStopping(patience=TCH_EARLYSTOP_PATIENCE, verbose=True)
     patience = 0
@@ -481,6 +605,9 @@ def train(args, Dtr, Val, path):
             val_loss_all.append(val_loss/num_item)
         else:
             val_loss_all.append(val_loss)
+
+        if best_loss is None:
+            best_loss = val_loss_all[-1]
         
         #get the best model.
         if(val_loss_all[-1]<best_loss):
@@ -507,6 +634,7 @@ def train(args, Dtr, Val, path):
                 print(key)
                 print(result[key])
         else:
+            pass
             # num = 0
             # rankAva = 0
             # for idx in range(len(model_result)):
@@ -517,8 +645,8 @@ def train(args, Dtr, Val, path):
             #     rankAva += rank
             #     num += 1
             # print("\nAverage Rank is:", int(rankAva/num))
-            topn_rank(model_result, targets, 1)
-            topn_rank(model_result, targets, 2)
+            # topn_rank(model_result, targets, 1)
+            # topn_rank(model_result, targets, 2)
             # topn_rank(model_result, targets, 3)
 
             # num = 0
@@ -666,10 +794,10 @@ if __name__ == '__main__' :
     #xxx_begin and xxx_end for data split, can be modified per yourslef.
     args={
           "input_size":BK_SIZE*len(COLS), #number of input parameters used in predition. you can modify it in data index list.
-          "hidden_size":int(BK_SIZE*len(COLS)*1.3),#number of cells in one hidden layer.
-          "num_layers":3,  #number of hidden layers in predition module.
+          "hidden_size":int(BK_SIZE*len(COLS)*3),#number of cells in one hidden layer.
+          "num_layers":4,  #number of hidden layers in predition module.
           "output_size":BK_SIZE, #number of parameter will be predicted.
-          "lr":1e-5,
+          "lr":1e-4,
           "weight_decay":0.0, #0001,
           "bidirectional":False,
           "type": "LSTM", # BiLSTM, LSTM, MultiLabelLSTM
@@ -678,8 +806,8 @@ if __name__ == '__main__' :
           "gamma":0.5,
           "epochs":50000,
           "batch_size":64,#batch of data will be push in model. large batch in multi parameter prediction will be better.
-          "seq_len":60, #one contionus series input data will be used to predict the selected parameter.
-          "multi_steps":5,#next x days's stock price can be predictions. maybe 1,2,3....
+          "seq_len":80, #one contionus series input data will be used to predict the selected parameter.
+          "multi_steps":2,#next x days's stock price can be predictions. maybe 1,2,3....
           "pred_type":"close",#open price / close price / high price / low price.
           "train_end":1.0,
           "val_begin":0.6,
@@ -720,7 +848,7 @@ if __name__ == '__main__' :
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA or CPU:", device)
     #load data to a dataFrame.
-    Dtr, Val, Dte, last_seq_ts, testdf = nn_bkdata_seq(args['batch_size'], args['type'])
+    Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq(args['batch_size'], args['type'])
     #train it.
     if ONLY_PREDICT == False:
         train(args, Dtr, Val, path_file)
