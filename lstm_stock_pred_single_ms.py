@@ -32,6 +32,7 @@ COLS = ["open", "close", "high", "low", "vol"]
 TCH_EARLYSTOP_PATIENCE = 200
 ONLY_PREDICT = False
 CLOSE_LABEL_THRESHOLD = 0.94
+NP_TOPN = 10
 
 #cmd line parmeters.
 def cmd_line():
@@ -122,7 +123,7 @@ def load_data(file_name):
 def load_stocks_data(file_name):
     df = pd.read_hdf("rlcalc.hdf", "rlcalc")
     df = df.reset_index().set_index(["exchange", "code", "date"]).sort_index()
-    df = df.loc[df.index.get_level_values("date") > "2012-1-1"]
+    df = df.loc[df.index.get_level_values("date") > "2017-1-1"]
     # print(df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"))
     # print(df.loc[(df<-1.0).any(axis=1)].index.get_level_values("code"))
     for code in df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"):
@@ -214,11 +215,18 @@ def process_bkMultiLabel(data, batch_size, shuffle,data_index_set):
 def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
     args=get_args()
 
-    seq_pkl_name = "torch_stock_seq" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl'
-    last_pkl_name = "torch_stock_last" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl'
+    seq_pkl_name = "torch_stock_seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl'
+    last_pkl_name = "torch_stock_last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl'
+
 
     if os.path.exists(seq_pkl_name):
-        return pickle.load(seq_pkl_name), pickle.load(last_pkl_name)
+        seq_pkl_file = open(seq_pkl_name, "rb")
+        last_pkl_file = open(last_pkl_name, "rb")
+        seq_pkl = pickle.load(seq_pkl_file)
+        last_pkl = pickle.load(last_pkl_file)
+        seq_pkl_file.close()
+        last_pkl_file.close()
+        return seq_pkl, last_pkl
 
     seq_len=get_args()["seq_len"]
     steps=args["multi_steps"]
@@ -267,8 +275,12 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
     else:
         seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=2, drop_last=(not test_pred)) #shuffle=shuffle,
 
-    pickle.dump(seq, seq_pkl_name)
-    pickle.dump(last_seq_ts, last_pkl_name)
+    pkl_file = open(seq_pkl_name, "wb")
+    pickle.dump(seq, pkl_file)
+    pkl_file.close()
+    pkl_file = open(last_pkl_name, "wb")
+    pickle.dump(last_seq_ts, pkl_file)
+    pkl_file.close()
     return seq, last_seq_ts
 
 # Create dataset.
@@ -568,6 +580,52 @@ def train(args, Dtr, Val, path):
 
     print('training...')
     for epoch in tqdm(range(args['epochs'])):
+        # validation
+        val_loss=0
+        num_item=0
+        targets = []
+        model_result = []
+        model.eval()
+        for (seq, label) in Val:
+            seq = seq.to(device)
+            label = label.to(device)
+            y_pred = model(seq)
+            model_result.extend( y_pred.detach().cpu().numpy() )
+            targets.extend( label.detach().cpu().numpy() )
+            loss = loss_function(y_pred, label)
+            val_loss+=loss.item()*len(y_pred)
+            num_item+=len(y_pred)
+        if num_item>0:
+            val_loss_all.append(val_loss/num_item)
+        else:
+            val_loss_all.append(val_loss)
+
+        if best_loss is None:
+            best_loss = val_loss_all[-1]
+
+        #get the best model.
+        if(val_loss_all[-1]<best_loss):
+            best_loss=val_loss_all[-1]
+            best_model=copy.deepcopy(model)
+            state = {'models': best_model.state_dict()}
+            print('Saving models...')
+            torch.save(state, path)
+            patience = 0
+        elif val_loss_all[-1]>best_loss:
+            patience += 1
+            if patience > TCH_EARLYSTOP_PATIENCE:
+                break
+
+        if args["type"] == "MultiLabelLSTM":
+            result = calculate_metrics(np.array(model_result), np.array(targets))
+            for key in result:
+                print(key)
+                print(result[key])
+        else:
+            topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
+            topnclose = np.take(targets, topnidx)
+            print("\nAverage close is:", topnclose.mean())
+
         train_loss = 0
         num_item=0
         model.train()
@@ -586,83 +644,6 @@ def train(args, Dtr, Val, path):
             train_loss_all.append(train_loss/num_item)
         else:
             train_loss_all.append(train_loss)
-        # validation
-        val_loss=0
-        num_item=0
-        targets = []
-        model_result = []
-        model.eval()
-        for (seq, label) in Val:
-            seq = seq.to(device)
-            label = label.to(device)
-            y_pred = model(seq)
-            model_result.extend( y_pred.detach().cpu().numpy() )
-            targets.extend( label.detach().cpu().numpy() )
-            loss = loss_function(y_pred, label)
-            val_loss+=loss.item()*len(y_pred)
-            num_item+=len(y_pred)
-        if num_item>0:    
-            val_loss_all.append(val_loss/num_item)
-        else:
-            val_loss_all.append(val_loss)
-
-        if best_loss is None:
-            best_loss = val_loss_all[-1]
-        
-        #get the best model.
-        if(val_loss_all[-1]<best_loss):
-            best_loss=val_loss_all[-1]
-            best_model=copy.deepcopy(model)        
-            state = {'models': best_model.state_dict()}
-            print('Saving models...')
-            torch.save(state, path)
-            patience = 0
-        elif val_loss_all[-1]>best_loss:
-            patience += 1
-            if patience > TCH_EARLYSTOP_PATIENCE:
-                break
-
-        # early_stopping(val_loss, model)
-        #
-        # if early_stopping.early_stop:
-        #     print("Early stopping")
-        #     break
-
-        if args["type"] == "MultiLabelLSTM":
-            result = calculate_metrics(np.array(model_result), np.array(targets))
-            for key in result:
-                print(key)
-                print(result[key])
-        else:
-            pass
-            # num = 0
-            # rankAva = 0
-            # for idx in range(len(model_result)):
-            #     maxIdx = model_result[idx].argmax()
-            #     ranks = targets[idx].argsort().argsort()
-            #     rank = np.take(ranks, maxIdx).mean()
-            #     # rank = ranks.mean()
-            #     rankAva += rank
-            #     num += 1
-            # print("\nAverage Rank is:", int(rankAva/num))
-            # topn_rank(model_result, targets, 1)
-            # topn_rank(model_result, targets, 2)
-            # topn_rank(model_result, targets, 3)
-
-            # num = 0
-            # rankAva = 0
-            # for (seq, label) in Val:
-            #     seq = seq.to(device)
-            #     label = label.to(device)
-            #     y_pred = model(seq)
-            #     maxIdx = y_pred.detach().cpu().numpy().argmax(axis=1)
-            #     ranks = label.detach().cpu().numpy().argsort().argsort()
-            #     rank = np.take(ranks, maxIdx).mean()
-            #     # rank = ranks.mean()
-            #     rankAva += rank
-            #     num += 1
-            # print("\nAverage Rank is:", int(rankAva/num))
-
 
         print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, patience), flush=True)
 
