@@ -30,9 +30,9 @@ BK_SIZE = 1 #len(BKS)
 BK_TOPN = 10
 COLS = ["open", "close", "high", "low", "vol"]
 TCH_EARLYSTOP_PATIENCE = 200
-ONLY_PREDICT = False
+ONLY_PREDICT = True
 CLOSE_LABEL_THRESHOLD = 0.94
-NP_TOPN = 10
+NP_TOPN = 20
 
 #cmd line parmeters.
 def cmd_line():
@@ -237,6 +237,7 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
 
     predstep = steps + seq_len
     seq = []
+    last_seq_ts = []
 
     for code in dataAll.index.get_level_values("code").unique():
         data = dataAll.loc[("szse", code)].sort_index()
@@ -263,17 +264,22 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
                 # train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
                 train_label_ts = torch.FloatTensor(np.array(train_labels)[-steps:].sum(axis=0)).view(-1)
                 seq.append((train_seq_ts, train_label_ts))
-    if test_pred == True and False:
-        last_seq_ts = torch.FloatTensor(train_seqs[-seq_len:])
-        seq.append((last_seq_ts, train_label_ts))
-        print("fixme if step more than 1")
+        last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+    if test_pred == True:
+        last_seq_ts = MyDataset(last_seq_ts)
+        #if not test_pred else 1, drop_last=(not test_pred)
+        if args["type"] == "MultiLabelLSTM":
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
+        else:
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
     else:
         last_seq_ts = None
     seq = MyDataset(seq)
+    #if not test_pred else 1, drop_last=(not test_pred)
     if args["type"] == "MultiLabelLSTM":
-        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(seq), num_workers=2, drop_last=(not test_pred)) #shuffle=shuffle,
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(seq), num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
     else:
-        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=2, drop_last=(not test_pred)) #shuffle=shuffle,
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
 
     pkl_file = open(seq_pkl_name, "wb")
     pickle.dump(seq, pkl_file)
@@ -360,8 +366,12 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     #     data_mm.append(mm)
 
     #dataset.
-    Dtr, _ = process_stocks(train, batch_size, True,data_index_set)
-    Val, _ = process_stocks(val,   batch_size, True,data_index_set)
+    if ONLY_PREDICT == False:
+        Dtr, _ = process_stocks(train, batch_size, True,data_index_set)
+        Val, _ = process_stocks(val,   batch_size, True,data_index_set)
+    else:
+        Dtr = None
+        Val = None
     Dte, last_seq_ts = process_stocks(test,  batch_size, False,data_index_set, test_pred=True)
 
     return Dtr, Val, Dte, last_seq_ts, test
@@ -704,12 +714,13 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
         y=np.empty(shape=(0,args["output_size"]))
     targets = []
     model_result = []
+    #'''
     for (seq, target) in tqdm(Dte):
         y=np.append(y,target.numpy(),axis=0)
         seq = seq.to(device)
         with torch.no_grad():
             y_pred = model(seq)
-            pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
+            # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
             model_result.extend( y_pred.detach().cpu().numpy() )
             targets.extend( target.detach().cpu().numpy() )
 
@@ -719,14 +730,35 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
             print(key)
             print(result[key])
     else:
-        topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 1)
-        topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 2)
-        topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 3)
+        # topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 1)
+        # topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 2)
+        # topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 3)
+        #
+        # last_pred = y_pred.cpu().numpy()[0]
+        # top3idx = last_pred.argsort()[-3]
+        # top3mask = last_pred>=last_pred[top3idx]
+        # print("predict top3 at", testdf.index[-1][0], testdf.loc[testdf.index[-1][0]].index.get_level_values(1)[top3mask])
+        topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
+        topnclose = np.take(targets, topnidx)
+        print("\nAverage close is:", topnclose.mean())
+    #'''
+    codes = []
+    targets = []
+    model_result = []
+    for (seq, target, code) in last_seq_ts:
+        # y=np.append(y,target.numpy(),axis=0)
+        seq = seq.to(device)
+        with torch.no_grad():
+            y_pred = model(seq)
+            # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
+            model_result.extend( y_pred.detach().cpu().numpy() )
+            targets.extend( target.detach().cpu().numpy() )
+            codes.extend(code)
 
-        last_pred = y_pred.cpu().numpy()[0]
-        top3idx = last_pred.argsort()[-3]
-        top3mask = last_pred>=last_pred[top3idx]
-        print("predict top3 at", testdf.index[-1][0], testdf.loc[testdf.index[-1][0]].index.get_level_values(1)[top3mask])
+    topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
+    topnclose = np.take(codes, topnidx)
+    print("topn codes")
+    print(topnclose)
 
     # y = (m - n) * y + n
     # pred = (m - n) * pred + n
