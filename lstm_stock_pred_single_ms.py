@@ -1,4 +1,5 @@
-import numpy as np 
+import numpy as np
+import pandas
 import torch
 from torch import device, nn
 import pandas as pd 
@@ -29,10 +30,15 @@ BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '88
 BK_SIZE = 1 #len(BKS)
 BK_TOPN = 10
 COLS = ["open", "close", "high", "low", "vol"]
-TCH_EARLYSTOP_PATIENCE = 200
+TCH_EARLYSTOP_PATIENCE = 20
 ONLY_PREDICT = True
+NO_TEST = False
 CLOSE_LABEL_THRESHOLD = 0.94
 NP_TOPN = 20
+
+DATA_TRAIN_FN = "rlcalc_zxbintra_train.hdf"
+DATA_VAL_FN = "rlcalc_zxbintra_va.hdf"
+DATA_TEST_FN = "rlcalc_zxbintra_test.hdf"
 
 #cmd line parmeters.
 def cmd_line():
@@ -121,16 +127,17 @@ def load_data(file_name):
     return df 
 
 def load_stocks_data(file_name):
-    df = pd.read_hdf("rlcalc.hdf", "rlcalc")
+    df = pd.read_hdf(file_name, "rlcalc")
     df = df.reset_index().set_index(["exchange", "code", "date"]).sort_index()
-    df = df.loc[df.index.get_level_values("date") > "2017-1-1"]
+    df = df.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
+    df = df.loc[df.index.get_level_values("date") > "2017-1-1", COLS]
     # print(df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"))
     # print(df.loc[(df<-1.0).any(axis=1)].index.get_level_values("code"))
-    for code in df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"):
-        print(code)
+    for code in df.loc[(df>1.0).any(axis=1)].index.get_level_values("code").unique():
+        print("drop", code)
         df = df.loc[df.index.get_level_values("code")!=code]
-    for code in df.loc[(df<-1.0).any(axis=1)].index.get_level_values("code"):
-        print(code)
+    for code in df.loc[(df<-1.0).any(axis=1)].index.get_level_values("code").unique():
+        print("drop", code)
         df = df.loc[df.index.get_level_values("code")!=code]
     return df
 
@@ -215,8 +222,8 @@ def process_bkMultiLabel(data, batch_size, shuffle,data_index_set):
 def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
     args=get_args()
 
-    seq_pkl_name = "torch_stock_seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl'
-    last_pkl_name = "torch_stock_last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl'
+    seq_pkl_name = "torch_stock_seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+    last_pkl_name = "torch_stock_last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
 
 
     if os.path.exists(seq_pkl_name):
@@ -241,9 +248,10 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
 
     for code in dataAll.index.get_level_values("code").unique():
         data = dataAll.loc[("szse", code)].sort_index()
-        print("code", code)
+        print("proc code", code)
         train_seqs = []
         train_labels = []
+        train_adjs = []
         dataLen = 0
 
         for date in data.index.get_level_values("date").unique().sort_values():
@@ -257,12 +265,16 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
             #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
             train_seqs += [train_seq]
             train_labels += [[data.loc[date, "close"]]]
+            train_adjs += [[-data.loc[date, "high"]]]
 
             dataLen += 1
             if dataLen >= predstep:
                 train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
                 # train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
-                train_label_ts = torch.FloatTensor(np.array(train_labels)[-steps:].sum(axis=0)).view(-1)
+                if steps == 1:
+                    train_label_ts = torch.FloatTensor(train_adjs[-1]).view(-1)
+                else:
+                    train_label_ts = torch.FloatTensor(train_adjs[-1] + np.array(train_labels)[-steps+1:].sum(axis=0)).view(-1)
                 seq.append((train_seq_ts, train_label_ts))
         last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code)] #todo train_label_ts is not the true label of future seq, but doesn't matter
     if test_pred == True:
@@ -333,7 +345,7 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
 # split date and create datasets for train /validate and test.
 def nn_stocksdata_seq(batch_size, lstmtype):
     print('data processing...')
-    data_file_name = "rlcalc.hdf"
+    data_file_name = "rlcalc_zxbintra_train.hdf"
     dataset = load_stocks_data(data_file_name)
     # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
 
@@ -349,10 +361,22 @@ def nn_stocksdata_seq(batch_size, lstmtype):
 
     all_code_len = len(dates)
     train_date_end = dates[int(all_code_len*algs["train_end"])]
-    train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
+    if os.path.exists(DATA_TRAIN_FN):
+        train = load_stocks_data(DATA_TRAIN_FN)
+    else:
+        print("missing")
+        train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
     val_date_end = dates[int(all_code_len*algs["val_end"])]
-    val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
-    test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
+    if os.path.exists(DATA_VAL_FN):
+        val = load_stocks_data(DATA_VAL_FN)
+    else:
+        print("missing")
+        val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
+    if os.path.exists(DATA_TEST_FN):
+        test = load_stocks_data(DATA_TEST_FN)
+    else:
+        print("missing")
+        test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
 
     # # split
     # # train = dataset.iloc[:int(len(dataset.index)/BK_SIZE * algs["train_end"])*BK_SIZE]
@@ -581,7 +605,7 @@ def train(args, Dtr, Val, path):
 
     # training
     best_model = None
-    train_loss_all=[]
+    train_loss_all=[-1.0]
     val_loss_all=[]
     best_loss=None
     # initialize the early_stopping object
@@ -613,6 +637,17 @@ def train(args, Dtr, Val, path):
         if best_loss is None:
             best_loss = val_loss_all[-1]
 
+        if args["type"] == "MultiLabelLSTM":
+            result = calculate_metrics(np.array(model_result), np.array(targets))
+            for key in result:
+                print(key)
+                print(result[key])
+        else:
+            topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
+            topnclose = np.take(targets, topnidx)
+            print("\nAverage close is:", topnclose.mean())
+        print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, patience), flush=True)
+
         #get the best model.
         if(val_loss_all[-1]<best_loss):
             best_loss=val_loss_all[-1]
@@ -625,16 +660,6 @@ def train(args, Dtr, Val, path):
             patience += 1
             if patience > TCH_EARLYSTOP_PATIENCE:
                 break
-
-        if args["type"] == "MultiLabelLSTM":
-            result = calculate_metrics(np.array(model_result), np.array(targets))
-            for key in result:
-                print(key)
-                print(result[key])
-        else:
-            topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
-            topnclose = np.take(targets, topnidx)
-            print("\nAverage close is:", topnclose.mean())
 
         train_loss = 0
         num_item=0
@@ -655,7 +680,6 @@ def train(args, Dtr, Val, path):
         else:
             train_loss_all.append(train_loss)
 
-        print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, patience), flush=True)
 
     #save the best model.
     state = {'models': best_model.state_dict()}
@@ -712,36 +736,32 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
     else:
         pred=np.empty(shape=(0,args["output_size"]))
         y=np.empty(shape=(0,args["output_size"]))
-    targets = []
-    model_result = []
-    #'''
-    for (seq, target) in tqdm(Dte):
-        y=np.append(y,target.numpy(),axis=0)
-        seq = seq.to(device)
-        with torch.no_grad():
-            y_pred = model(seq)
-            # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
-            model_result.extend( y_pred.detach().cpu().numpy() )
-            targets.extend( target.detach().cpu().numpy() )
 
-    if args["type"] == "MultiLabelLSTM":
-        result = calculate_metrics(np.array(model_result)[:-args["multi_steps"]], np.array(targets)[:-args["multi_steps"]])
-        for key in result:
-            print(key)
-            print(result[key])
-    else:
-        # topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 1)
-        # topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 2)
-        # topn_rank(y[:-args["multi_steps"]], pred[:-args["multi_steps"]], 3)
-        #
-        # last_pred = y_pred.cpu().numpy()[0]
-        # top3idx = last_pred.argsort()[-3]
-        # top3mask = last_pred>=last_pred[top3idx]
-        # print("predict top3 at", testdf.index[-1][0], testdf.loc[testdf.index[-1][0]].index.get_level_values(1)[top3mask])
-        topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
-        topnclose = np.take(targets, topnidx)
-        print("\nAverage close is:", topnclose.mean())
-    #'''
+    if not NO_TEST:
+        targets = []
+        model_result = []
+        for (seq, target) in tqdm(Dte):
+            y=np.append(y,target.numpy(),axis=0)
+            seq = seq.to(device)
+            with torch.no_grad():
+                y_pred = model(seq)
+                # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
+                model_result.extend( y_pred.detach().cpu().numpy() )
+                targets.extend( target.detach().cpu().numpy() )
+
+        if args["type"] == "MultiLabelLSTM":
+            result = calculate_metrics(np.array(model_result)[:-args["multi_steps"]], np.array(targets)[:-args["multi_steps"]])
+            for key in result:
+                print(key)
+                print(result[key])
+        else:
+            topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
+            topnclose = np.take(targets, topnidx)
+            print(f"\nAverage {NP_TOPN} close is:", topnclose.mean())
+            topnpred = np.take(model_result, topnidx)
+            topnclose = np.concatenate((topnpred, topnclose), axis=1)
+            print("\ntopn close is:\r\n", topnclose)
+
     codes = []
     targets = []
     model_result = []
@@ -755,10 +775,19 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
             targets.extend( target.detach().cpu().numpy() )
             codes.extend(code)
 
+    # topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
+    # topnclose = np.take(codes, topnidx)
+    # print("topn codes")
+    # print(topnclose)
     topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
     topnclose = np.take(codes, topnidx)
-    print("topn codes")
-    print(topnclose)
+    print("predicting code")
+    for c in topnclose:
+        print(c)
+    # print(f"\nAverage {NP_TOPN} close is:", topnclose.mean())
+    topnpred = np.take(model_result, topnidx)
+    topnclose = np.concatenate((topnclose, topnpred), axis=1)
+    print("\ntopn close is:\r\n", topnclose)
 
     # y = (m - n) * y + n
     # pred = (m - n) * pred + n
@@ -807,10 +836,10 @@ if __name__ == '__main__' :
     #xxx_begin and xxx_end for data split, can be modified per yourslef.
     args={
           "input_size":BK_SIZE*len(COLS), #number of input parameters used in predition. you can modify it in data index list.
-          "hidden_size":int(BK_SIZE*len(COLS)*3),#number of cells in one hidden layer.
+          "hidden_size":int(BK_SIZE*len(COLS)*4),#number of cells in one hidden layer.
           "num_layers":4,  #number of hidden layers in predition module.
           "output_size":BK_SIZE, #number of parameter will be predicted.
-          "lr":1e-4,
+          "lr":1e-5,
           "weight_decay":0.0, #0001,
           "bidirectional":False,
           "type": "LSTM", # BiLSTM, LSTM, MultiLabelLSTM
@@ -820,7 +849,7 @@ if __name__ == '__main__' :
           "epochs":50000,
           "batch_size":64,#batch of data will be push in model. large batch in multi parameter prediction will be better.
           "seq_len":80, #one contionus series input data will be used to predict the selected parameter.
-          "multi_steps":2,#next x days's stock price can be predictions. maybe 1,2,3....
+          "multi_steps":2, #next x days's stock price can be predictions. maybe 1,2,3....
           "pred_type":"close",#open price / close price / high price / low price.
           "train_end":1.0,
           "val_begin":0.6,
