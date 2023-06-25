@@ -22,6 +22,8 @@ import math
 from sklearn.metrics import precision_score, recall_score, f1_score
 from torchsampler import ImbalancedDatasetSampler
 import pickle
+from exp_tools import dfCfg
+import datetime
 # from pytorchtools import EarlyStopping
 
 BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '880335', '880344', '880350', '880351', '880355', '880360', '880367', '880372', '880380', '880387', '880390', '880398', '880399', '880400', '880406', '880414', '880418', '880421', '880422', '880423', '880424', '880430', '880431', '880432', '880437', '880440', '880446', '880447', '880448', '880452', '880453', '880454', '880455', '880456', '880459', '880464', '880465', '880471', '880472', '880473', '880474', '880476', '880482', '880489', '880490', '880491', '880492', '880493', '880494', '880497', '399001']
@@ -36,9 +38,11 @@ NO_TEST = False
 CLOSE_LABEL_THRESHOLD = 0.94
 NP_TOPN = 20
 
-DATA_TRAIN_FN = "rlcalc_zxbintra_train.hdf"
-DATA_VAL_FN = "rlcalc_zxbintra_va.hdf"
-DATA_TEST_FN = "rlcalc_zxbintra_test.hdf"
+DATA_FN_KEY = "zxbintra"
+
+DATA_TRAIN_FN = f"rlcalc_{DATA_FN_KEY}_train.hdf"
+DATA_VAL_FN = f"rlcalc_{DATA_FN_KEY}_val.hdf"
+DATA_TEST_FN = f"rlcalc_{DATA_FN_KEY}_test.hdf"
 
 #cmd line parmeters.
 def cmd_line():
@@ -265,18 +269,18 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
             #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
             train_seqs += [train_seq]
             train_labels += [[data.loc[date, "close"]]]
-            train_adjs += [[-data.loc[date, "high"]]]
+            train_adjs += [[-data.loc[date, "open"]/np.log(dfCfg[DATA_FN_KEY]["hfq_close"])*np.log(dfCfg[DATA_FN_KEY]["hfq_open"][0])]]
 
             dataLen += 1
             if dataLen >= predstep:
                 train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
                 # train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
                 if steps == 1:
-                    train_label_ts = torch.FloatTensor(train_adjs[-1]).view(-1)
+                    train_label_ts = torch.FloatTensor(train_adjs[-steps]).view(-1)
                 else:
-                    train_label_ts = torch.FloatTensor(train_adjs[-1] + np.array(train_labels)[-steps+1:].sum(axis=0)).view(-1)
-                seq.append((train_seq_ts, train_label_ts))
-        last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+                    train_label_ts = torch.FloatTensor(train_adjs[-steps] + np.array(train_labels)[-steps+1:].sum(axis=0)).view(-1)
+                seq.append((train_seq_ts, train_label_ts, code, date.value))
+        last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
     if test_pred == True:
         last_seq_ts = MyDataset(last_seq_ts)
         #if not test_pred else 1, drop_last=(not test_pred)
@@ -620,7 +624,7 @@ def train(args, Dtr, Val, path):
         targets = []
         model_result = []
         model.eval()
-        for (seq, label) in Val:
+        for (seq, label, _, _) in Val:
             seq = seq.to(device)
             label = label.to(device)
             y_pred = model(seq)
@@ -653,7 +657,7 @@ def train(args, Dtr, Val, path):
             best_loss=val_loss_all[-1]
             best_model=copy.deepcopy(model)
             state = {'models': best_model.state_dict()}
-            print('Saving models...')
+            print('\r\nSaving models...\r\n', flush=True)
             torch.save(state, path)
             patience = 0
         elif val_loss_all[-1]>best_loss:
@@ -664,7 +668,7 @@ def train(args, Dtr, Val, path):
         train_loss = 0
         num_item=0
         model.train()
-        for (seq, label) in Dtr:
+        for (seq, label, _, _) in Dtr:
             seq = seq.to(device)
             label = label.to(device)
             y_pred = model(seq)
@@ -738,34 +742,44 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
         y=np.empty(shape=(0,args["output_size"]))
 
     if not NO_TEST:
-        targets = []
-        model_result = []
-        for (seq, target) in tqdm(Dte):
+        targets_dates = {}
+        model_result_dates = {}
+        code_dates = {}
+        for (seq, target, code, date) in tqdm(Dte):
+            date = date.item()
+            if date not in targets_dates:
+                model_result_dates[date] = []
+                targets_dates[date] = []
+                code_dates[date] = []
             y=np.append(y,target.numpy(),axis=0)
             seq = seq.to(device)
             with torch.no_grad():
                 y_pred = model(seq)
                 # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
-                model_result.extend( y_pred.detach().cpu().numpy() )
-                targets.extend( target.detach().cpu().numpy() )
+                model_result_dates[date].extend( y_pred.detach().cpu().numpy() )
+                targets_dates[date].extend( target.detach().cpu().numpy() )
+                code_dates[date].extend( code )
 
-        if args["type"] == "MultiLabelLSTM":
-            result = calculate_metrics(np.array(model_result)[:-args["multi_steps"]], np.array(targets)[:-args["multi_steps"]])
-            for key in result:
-                print(key)
-                print(result[key])
-        else:
-            topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
-            topnclose = np.take(targets, topnidx)
-            print(f"\nAverage {NP_TOPN} close is:", topnclose.mean())
-            topnpred = np.take(model_result, topnidx)
-            topnclose = np.concatenate((topnpred, topnclose), axis=1)
-            print("\ntopn close is:\r\n", topnclose)
+        for date in model_result_dates.keys():
+            # date = date.item()
+            if args["type"] == "MultiLabelLSTM":
+                result = calculate_metrics(np.array(model_result)[:-args["multi_steps"]], np.array(targets)[:-args["multi_steps"]])
+                for key in result:
+                    print(key)
+                    print(result[key])
+            else:
+                topnidx = np.array(model_result_dates[date]).argsort(axis=0)[-NP_TOPN:, :]
+                topnclose = np.take(targets_dates[date], topnidx)
+                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", topnclose.mean())
+                topncode = np.take(code_dates[date], topnidx)
+                topnpred = np.take(model_result_dates[date], topnidx)
+                topnclose = np.concatenate((topncode, topnclose, topnpred), axis=1)
+                print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n", topnclose)
 
     codes = []
     targets = []
     model_result = []
-    for (seq, target, code) in last_seq_ts:
+    for (seq, target, code, date) in last_seq_ts:
         # y=np.append(y,target.numpy(),axis=0)
         seq = seq.to(device)
         with torch.no_grad():
@@ -781,7 +795,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
     # print(topnclose)
     topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
     topnclose = np.take(codes, topnidx)
-    print("predicting code")
+    print("predicting code", pandas.to_datetime(date.item()))
     for c in topnclose:
         print(c)
     # print(f"\nAverage {NP_TOPN} close is:", topnclose.mean())
