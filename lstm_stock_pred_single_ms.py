@@ -649,7 +649,7 @@ def train(args, Dtr, Val, path):
         else:
             topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
             topnclose = np.take(targets, topnidx)
-            print("\nAverage close is:", topnclose.mean())
+            print("\nAverage close is:", topnclose.mean(), np.mean(targets))
         print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, patience), flush=True)
 
         #get the best model.
@@ -757,8 +757,16 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
                 y_pred = model(seq)
                 # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
                 model_result_dates[date].extend( y_pred.detach().cpu().numpy() )
-                targets_dates[date].extend( target.detach().cpu().numpy() )
+                targets_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
                 code_dates[date].extend( code )
+
+        idx = 0
+        target_means = []
+        target_topn_means = []
+        profit_all = 1.0
+        profit_topn = 1.0
+        profit_all1 = 1.0
+        profit_topn1 = 1.0
 
         for date in model_result_dates.keys():
             # date = date.item()
@@ -770,11 +778,25 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
             else:
                 topnidx = np.array(model_result_dates[date]).argsort(axis=0)[-NP_TOPN:, :]
                 topnclose = np.take(targets_dates[date], topnidx)
-                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", topnclose.mean())
+                topnpred = np.take(model_result_dates[date], topnidx)
+
+                target_topn_means += [topnclose.mean()]
+                target_means += [np.mean(targets_dates[date])]
+                if idx%2 == 0:
+                    profit_all *= target_means[-1]
+                    # if topnpred.mean() > 1.02 and True:  #fixme tobe continue
+                    #     profit_topn *= target_topn_means[-1]
+                    profit_topn *= target_topn_means[-1]
+                else:
+                    profit_all1 *= target_means[-1]
+                    profit_topn1 *= target_topn_means[-1]
+
+                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_all1, profit_topn1, np.mean(target_means), np.mean(target_topn_means))
                 topncode = np.take(code_dates[date], topnidx)
                 topnpred = np.take(model_result_dates[date], topnidx)
                 topnclose = np.concatenate((topncode, topnclose, topnpred), axis=1)
                 print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n", topnclose)
+                idx += 1
 
     codes = []
     targets = []
