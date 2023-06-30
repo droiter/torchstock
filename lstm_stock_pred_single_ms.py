@@ -40,9 +40,11 @@ NP_TOPN = 20
 
 DATA_FN_KEY = "zxbintra"
 
+DATA_ALL_FN = f"rlcalc_{DATA_FN_KEY}_all.hdf"
 DATA_TRAIN_FN = f"rlcalc_{DATA_FN_KEY}_train.hdf"
 DATA_VAL_FN = f"rlcalc_{DATA_FN_KEY}_val.hdf"
 DATA_TEST_FN = f"rlcalc_{DATA_FN_KEY}_test.hdf"
+DATA_PRED_FN = f"rlcalc_{DATA_FN_KEY}_pred.hdf"
 
 #cmd line parmeters.
 def cmd_line():
@@ -134,7 +136,8 @@ def load_stocks_data(file_name):
     df = pd.read_hdf(file_name, "rlcalc")
     df = df.reset_index().set_index(["exchange", "code", "date"]).sort_index()
     df = df.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
-    df = df.loc[df.index.get_level_values("date") > "2017-1-1", COLS]
+    df = df.loc[:, COLS]
+    # df = df.loc[df.index.get_level_values("date") > "2017-1-1", COLS]
     # print(df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"))
     # print(df.loc[(df<-1.0).any(axis=1)].index.get_level_values("code"))
     for code in df.loc[(df>1.0).any(axis=1)].index.get_level_values("code").unique():
@@ -349,38 +352,49 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
 # split date and create datasets for train /validate and test.
 def nn_stocksdata_seq(batch_size, lstmtype):
     print('data processing...')
-    data_file_name = "rlcalc_zxbintra_train.hdf"
-    dataset = load_stocks_data(data_file_name)
-    # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
 
-    algs=get_args()
-    #check number of data items in df, if it is too less , we can not train it.
-    algs["train_end"]=0.7
-    algs["val_begin"]=0.7
-    algs["val_end"]=0.9
-    algs["test_begin"]=0.9
-    print("fixme algs")
+    if ONLY_PREDICT == False or NO_TEST == False:
+        data_file_name = DATA_ALL_FN
+        dataset = load_stocks_data(data_file_name)
+        dateFirstIndex = dataset.reset_index().set_index(["date", "exchange", "code"]).sort_index().index
+        # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
 
-    dates = dataset.index.get_level_values("date").unique().sort_values()
+        algs=get_args()
+        #check number of data items in df, if it is too less , we can not train it.
+        algs["train_end"]=0.7
+        algs["val_begin"]=0.7
+        algs["val_end"]=0.85
+        algs["test_begin"]=0.85
+        print("fixme algs")
 
-    all_code_len = len(dates)
-    train_date_end = dates[int(all_code_len*algs["train_end"])]
-    if os.path.exists(DATA_TRAIN_FN):
-        train = load_stocks_data(DATA_TRAIN_FN)
+        all_code_len = len(dateFirstIndex)
+        train_date_end = dateFirstIndex[int(all_code_len*algs["train_end"])][0]
+        val_date_end = dateFirstIndex[int(all_code_len*algs["val_end"])][0]
+        print("train_end", train_date_end, "val_end", val_date_end)
+
+    if ONLY_PREDICT == False:
+        if os.path.exists(DATA_TRAIN_FN) and False:
+            train = load_stocks_data(DATA_TRAIN_FN)
+        else:
+            print("missing", DATA_TRAIN_FN)
+            train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
+        if os.path.exists(DATA_VAL_FN) and False:
+            val = load_stocks_data(DATA_VAL_FN)
+        else:
+            print("missing", DATA_VAL_FN)
+            val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
+
+    if NO_TEST == False:
+        if os.path.exists(DATA_TEST_FN) and False:
+            test = load_stocks_data(DATA_TEST_FN)
+        else:
+            print("missing", DATA_TEST_FN)
+            test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
+
+    if os.path.exists(DATA_PRED_FN):
+        pred = load_stocks_data(DATA_PRED_FN)
     else:
-        print("missing")
-        train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
-    val_date_end = dates[int(all_code_len*algs["val_end"])]
-    if os.path.exists(DATA_VAL_FN):
-        val = load_stocks_data(DATA_VAL_FN)
-    else:
-        print("missing")
-        val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
-    if os.path.exists(DATA_TEST_FN):
-        test = load_stocks_data(DATA_TEST_FN)
-    else:
-        print("missing")
-        test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
+        pred = None
 
     # # split
     # # train = dataset.iloc[:int(len(dataset.index)/BK_SIZE * algs["train_end"])*BK_SIZE]
@@ -400,9 +414,15 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     else:
         Dtr = None
         Val = None
-    Dte, last_seq_ts = process_stocks(test,  batch_size, False,data_index_set, test_pred=True)
 
-    return Dtr, Val, Dte, last_seq_ts, test
+    if NO_TEST == False:
+        Dte, _ = process_stocks(test,  1, False,data_index_set)
+        _, last_seq_ts = process_stocks(pred,  batch_size, False,data_index_set, test_pred=True)
+    else:
+        Dte = None
+        Dte, last_seq_ts = process_stocks(pred,  batch_size, False,data_index_set, test_pred=True)
+
+    return Dtr, Val, Dte, last_seq_ts, pred
 
 # split date and create datasets for train /validate and test.
 def nn_bkdata_seq(batch_size, lstmtype):
@@ -756,7 +776,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
             with torch.no_grad():
                 y_pred = model(seq)
                 # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
-                model_result_dates[date].extend( y_pred.detach().cpu().numpy() )
+                model_result_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], y_pred.detach().cpu().numpy()) )
                 targets_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
                 code_dates[date].extend( code )
 
