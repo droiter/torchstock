@@ -22,7 +22,7 @@ import math
 from sklearn.metrics import precision_score, recall_score, f1_score
 from torchsampler import ImbalancedDatasetSampler
 import pickle
-from exp_tools import dfCfg
+from exp_tools import dfCfg, dfCfgNorm, denorm_fn
 import datetime
 # from pytorchtools import EarlyStopping
 
@@ -36,7 +36,7 @@ TCH_EARLYSTOP_PATIENCE = 20
 ONLY_PREDICT = True
 NO_TEST = False
 CLOSE_LABEL_THRESHOLD = 0.94
-NP_TOPN = 20
+NP_TOPN = 10
 
 DATA_FN_KEY = "zxbintra"
 
@@ -309,6 +309,100 @@ def process_stocks_O2toO1(dataAll, batch_size, shuffle,data_index_set, test_pred
     pkl_file.close()
     return seq, last_seq_ts
 
+def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
+    args=get_args()
+
+    seq_pkl_name = "torch_stock_seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+    last_pkl_name = "torch_stock_last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+
+
+    if os.path.exists(seq_pkl_name):
+        seq_pkl_file = open(seq_pkl_name, "rb")
+        last_pkl_file = open(last_pkl_name, "rb")
+        seq_pkl = pickle.load(seq_pkl_file)
+        last_pkl = pickle.load(last_pkl_file)
+        seq_pkl_file.close()
+        last_pkl_file.close()
+        return seq_pkl, last_pkl
+
+    seq_len=get_args()["seq_len"]
+    steps=args["multi_steps"]
+    dataAll = dataAll.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
+
+    dataAll = dataAll.loc[:, COLS]
+    dataAll = dataAll.loc[dataAll.index.get_level_values("code") < "300000"] #"300000"
+
+    predstep = steps + seq_len
+    seq = []
+    last_seq_ts = []
+
+    for code in dataAll.index.get_level_values("code").unique():
+        data = dataAll.loc[("szse", code)].sort_index()
+        print("proc code", code)
+        train_seqs = []
+        train_labels = []
+        train_adjs = []
+        dataLen = 0
+        missing_seq = []
+
+        for date in data.index.get_level_values("date").unique().sort_values():
+            train_seq = data.loc[date].to_numpy().flatten().tolist()
+            # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            # train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            # if args["type"] != "MultiLabelLSTM":
+            #     train_label = data.loc[date, "close"].to_numpy().flatten().tolist()
+            # else:
+            #     close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            train_seqs += [train_seq]
+            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])]]
+            train_adjs += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])/denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["hfq_open"])]]
+
+            if data.loc[date].sum(skipna=False) != data.loc[date].sum(skipna=False):
+                missing_seq += [True]
+            else:
+                missing_seq += [False]
+
+            dataLen += 1
+            if dataLen >= predstep:
+                train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                # train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
+                if steps == 1:
+                    train_label_ts = torch.FloatTensor(train_adjs[-steps]).view(-1)
+                else:
+                    train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps+1:].prod(axis=0)).view(-1)
+                if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) == False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False:
+                    seq.append((train_seq_ts, train_label_ts, code, date.value))
+                else:
+                    print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
+        if any(missing_seq[-seq_len:]) == False:
+            last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+        else:
+            print("missing")
+    if test_pred == True:
+        last_seq_ts = MyDataset(last_seq_ts)
+        #if not test_pred else 1, drop_last=(not test_pred)
+        if args["type"] == "MultiLabelLSTM":
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
+        else:
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
+    else:
+        last_seq_ts = None
+    seq = MyDataset(seq)
+    #if not test_pred else 1, drop_last=(not test_pred)
+    if args["type"] == "MultiLabelLSTM":
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(seq), num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+    else:
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+
+    pkl_file = open(seq_pkl_name, "wb")
+    pickle.dump(seq, pkl_file)
+    pkl_file.close()
+    pkl_file = open(last_pkl_name, "wb")
+    pickle.dump(last_seq_ts, pkl_file)
+    pkl_file.close()
+    return seq, last_seq_ts
+
 #todo: for C1/O0
 def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
     args=get_args()
@@ -344,6 +438,7 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
         train_labels = []
         train_adjs = []
         dataLen = 0
+        missing_seq = []
 
         for date in data.index.get_level_values("date").unique().sort_values():
             train_seq = data.loc[date].to_numpy().flatten().tolist()
@@ -358,6 +453,12 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
             train_labels += [[data.loc[date, "close"]]]
             train_adjs += [[-data.loc[date, "open"]/np.log(dfCfg[DATA_FN_KEY]["hfq_close"])*np.log(dfCfg[DATA_FN_KEY]["hfq_open"][0])]]
 
+            if data.loc[date]["open"] == 0.0 and data.loc[date]["close"]==0.0 and data.loc[date]["high"]==-1.0 and data.loc[date]["low"]==1.0 \
+                and data.loc[date]["vol"]==-1.0:
+                missing_seq += [True]
+            else:
+                missing_seq += [False]
+
             dataLen += 1
             if dataLen >= predstep:
                 train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
@@ -366,8 +467,14 @@ def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False)
                     train_label_ts = torch.FloatTensor(train_adjs[-steps]).view(-1)
                 else:
                     train_label_ts = torch.FloatTensor(train_adjs[-steps] + np.array(train_labels)[-steps+1:].sum(axis=0)).view(-1)
-                seq.append((train_seq_ts, train_label_ts, code, date.value))
-        last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+                if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) == False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False:
+                    seq.append((train_seq_ts, train_label_ts, code, date.value))
+                else:
+                    print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
+        if any(missing_seq[-seq_len:]) == False:
+            last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+        else:
+            print("missing")
     if test_pred == True:
         last_seq_ts = MyDataset(last_seq_ts)
         #if not test_pred else 1, drop_last=(not test_pred)
@@ -493,23 +600,23 @@ def nn_stocksdata_seq(batch_size, lstmtype):
 
     #dataset. process_stocks_O2toO1
     if ONLY_PREDICT == False:
-        # Dtr, _ = process_stocks(train, batch_size, True,data_index_set)
-        # Val, _ = process_stocks(val,   batch_size, True,data_index_set)
-        Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
-        Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
+        Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set)
+        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set)
+        # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
+        # Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
     else:
         Dtr = None
         Val = None
 
     if NO_TEST == False:
-        # Dte, _ = process_stocks(test,  1, False,data_index_set)
-        # _, last_seq_ts = process_stocks(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
-        _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
+        Dte, _ = process_stocks_norm(test,  1, False,data_index_set)
+        _, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True)
+        # Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
+        # _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
     else:
         # Dte = None
-        # Dte, last_seq_ts = process_stocks(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
+        Dte, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True)
+        # Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
 
     return Dtr, Val, Dte, last_seq_ts, pred
 
@@ -795,8 +902,8 @@ def train(args, Dtr, Val, path):
 
 
     #save the best model.
-    state = {'models': best_model.state_dict()}
-    torch.save(state, path)
+    # state = {'models': best_model.state_dict()}
+    # torch.save(state, path)
     
     # plot for loss.
     if plot :
@@ -854,6 +961,8 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
         targets_dates = {}
         model_result_dates = {}
         code_dates = {}
+        targets = []
+        model_result = []
         for (seq, target, code, date) in tqdm(Dte):
             date = date.item()
             if date not in targets_dates:
@@ -864,10 +973,20 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
             seq = seq.to(device)
             with torch.no_grad():
                 y_pred = model(seq)
-                # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
-                model_result_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], y_pred.detach().cpu().numpy()) )
-                targets_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
+                # model_result_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], y_pred.detach().cpu().numpy()) )
+                # targets_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
+                # code_dates[date].extend( code )
+                # model_result.extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], y_pred.detach().cpu().numpy()) )
+                # targets.extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
+                model_result_dates[date].extend( y_pred.detach().cpu().numpy() )
+                targets_dates[date].extend( target.detach().cpu().numpy() )
                 code_dates[date].extend( code )
+                model_result.extend( y_pred.detach().cpu().numpy() )
+                targets.extend( target.detach().cpu().numpy() )
+
+            if len(model_result) == 100:
+                plt.plot(np.array(model_result).T, np.array(targets).T)
+                plt.show()
 
         idx = 0
         target_means = []
@@ -891,7 +1010,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
 
                 target_topn_means += [topnclose.mean()]
                 target_means += [np.mean(targets_dates[date])]
-                if idx%1 == 0:
+                if idx%2 == 0:
                     profit_all *= target_means[-1]
                     # if topnpred.mean() > 1.02 and True:  #fixme tobe continue
                     #     profit_topn *= target_topn_means[-1]
@@ -907,9 +1026,28 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
                 print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n", topnclose)
                 idx += 1
 
+    RPE_FILE_R = "/home/yacc/shares/rpe_pre.xlsx.colored.xlsx"
+    XSY_FILE_R = "/home/yacc/shares/xsy_pre.xlsx.colored.xlsx"
+    STING_FILE_R = "/home/yacc/shares/sting_pre.xlsx.colored.xlsx"
+    BDT_FILE_R = "/home/yacc/shares/bdt_pre.xlsx.colored.xlsx"
+    KJYL_FILE_R = "/home/yacc/shares/kjyl_pre.xlsx.colored.xlsx"
+
+    fileDict = {"xsy": XSY_FILE_R, "rpe": RPE_FILE_R, "sting": STING_FILE_R,
+            "bdt": BDT_FILE_R, "kjyl": KJYL_FILE_R}
+    filedfList = {}
+
+    for file in fileDict:
+        filedf = pandas.read_excel(fileDict[file], dtype={"股票代码":str}).set_index("股票代码")
+        filedf["idx"] = 0
+        for idx in range(len(filedf.index)):
+            filedf.loc[filedf.index[idx], "idx"] = idx
+        filedf["type"] = file
+        filedfList[file] = filedf
+
     codes = []
     targets = []
     model_result = []
+    stocktypes = []
     for (seq, target, code, date) in last_seq_ts:
         # y=np.append(y,target.numpy(),axis=0)
         seq = seq.to(device)
@@ -919,6 +1057,14 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
             model_result.extend( y_pred.detach().cpu().numpy() )
             targets.extend( target.detach().cpu().numpy() )
             codes.extend(code)
+            bfound = False
+            for stocktype in filedfList.keys():
+                if code[0] in filedfList[stocktype].index:
+                    stocktypes += [stocktype]
+                    bfound = True
+                    break
+            if not bfound:
+                stocktypes += ["no"]
 
     # topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
     # topnclose = np.take(codes, topnidx)
@@ -933,6 +1079,20 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
     topnpred = np.take(model_result, topnidx)
     topnclose = np.concatenate((topnclose, topnpred), axis=1)
     print("\ntopn close is:\r\n", topnclose)
+
+    typeLists = [["xsy", "rpe", "sting", "kjyl", "bdt"], ["xsy"], ["rpe"], ["sting"], ["kjyl"], ["bdt"]]
+
+
+    for typeList in typeLists:
+        stockMask = (np.array(stocktypes)==typeList[0])
+        for typec in typeList[1:]:
+            stockMask = stockMask | ((np.array(stocktypes)==typec))
+        maskedCode = np.array(codes)[stockMask]
+        maskedPred = np.array(model_result)[stockMask]
+        maskedAll = np.concatenate((maskedCode.reshape([-1, 1]), maskedPred), axis=1)
+        sortedAll = maskedAll[maskedAll[:, 1].argsort()]
+        print("\ntopn close code is:\r\n", typeList, sortedAll[:, 0])
+        print("\ntopn close is:\r\n", typeList, sortedAll)
 
     # y = (m - n) * y + n
     # pred = (m - n) * pred + n
