@@ -31,12 +31,14 @@ BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '88
 #BKS = ["000001", "880367", "399001"]
 BK_SIZE = 1 #len(BKS)
 BK_TOPN = 10
-COLS = ["open", "close", "high", "low", "vol"]
+COLS = ["open", "close", "high", "low", "vol"] #, 'buy_sm_vol', 'sell_sm_vol',  'buy_md_vol', 'sell_md_vol', 'buy_lg_vol', 'sell_lg_vol', 'buy_elg_vol', 'sell_elg_vol'] #
 TCH_EARLYSTOP_PATIENCE = 20
 ONLY_PREDICT = True
 NO_TEST = False
 CLOSE_LABEL_THRESHOLD = 0.94
 NP_TOPN = 10
+BIG_RISE = 0.6
+RISE_WIN = 5
 
 DATA_FN_KEY = "zxbintra"
 
@@ -309,6 +311,109 @@ def process_stocks_O2toO1(dataAll, batch_size, shuffle,data_index_set, test_pred
     pkl_file.close()
     return seq, last_seq_ts
 
+def process_stocks_norm_c2c1(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
+    args=get_args()
+
+    seq_pkl_name = "torch_stock_seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+    last_pkl_name = "torch_stock_last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+
+
+    if os.path.exists(seq_pkl_name):
+        seq_pkl_file = open(seq_pkl_name, "rb")
+        last_pkl_file = open(last_pkl_name, "rb")
+        seq_pkl = pickle.load(seq_pkl_file)
+        last_pkl = pickle.load(last_pkl_file)
+        seq_pkl_file.close()
+        last_pkl_file.close()
+        return seq_pkl, last_pkl
+
+    seq_len=get_args()["seq_len"]
+    steps=args["multi_steps"]
+    dataAll = dataAll.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
+
+    dataAll = dataAll.loc[:, COLS]
+    dataAll = dataAll.loc[dataAll.index.get_level_values("code") < "300000"] #"300000"
+
+    predstep = steps + seq_len
+    seq = []
+    last_seq_ts = []
+
+    for code in dataAll.index.get_level_values("code").unique():
+        data = dataAll.loc[("szse", code)].sort_index()
+        print("proc code", code)
+        train_seqs = []
+        train_labels = []
+        train_adjs = []
+        dataLen = 0
+        missing_seq = []
+        bigrise_seq = []
+
+        for date in data.index.get_level_values("date").unique().sort_values():
+            train_seq = data.loc[date].to_numpy().flatten().tolist()
+            # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            # train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            # if args["type"] != "MultiLabelLSTM":
+            #     train_label = data.loc[date, "close"].to_numpy().flatten().tolist()
+            # else:
+            #     close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            train_seqs += [train_seq]
+            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])]]
+            train_adjs += [[1.0]]
+
+            if data.loc[date].sum(skipna=False) != data.loc[date].sum(skipna=False):
+                missing_seq += [True]
+            else:
+                missing_seq += [False]
+
+            if data.loc[date, "close"] > BIG_RISE:
+                bigrise_seq += [True]
+            else:
+                bigrise_seq += [False]
+
+            dataLen += 1
+            if dataLen >= predstep:
+                train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                # train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
+                if steps == 1:
+                    train_label_ts = torch.FloatTensor(train_adjs[-steps]).view(-1)
+                else:
+                    train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps+1:].prod(axis=0)/train_labels[-steps]).view(-1)
+                if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) ==False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False \
+                        and any(bigrise_seq[-RISE_WIN-steps:-steps]):
+                    seq.append((train_seq_ts, train_label_ts, code, date.value))
+                else:
+                    pass
+                    #print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
+        if any(missing_seq[-seq_len:]) == False and any(bigrise_seq[-RISE_WIN:]):
+            last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+        else:
+            pass
+            #print("missing")
+    if test_pred == True:
+        last_seq_ts = MyDataset(last_seq_ts)
+        #if not test_pred else 1, drop_last=(not test_pred)
+        if args["type"] == "MultiLabelLSTM":
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
+        else:
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
+    else:
+        last_seq_ts = None
+    seq = MyDataset(seq)
+    #if not test_pred else 1, drop_last=(not test_pred)
+    if args["type"] == "MultiLabelLSTM":
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(seq), num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+    else:
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+
+    pkl_file = open(seq_pkl_name, "wb")
+    pickle.dump(seq, pkl_file)
+    pkl_file.close()
+    pkl_file = open(last_pkl_name, "wb")
+    pickle.dump(last_seq_ts, pkl_file)
+    pkl_file.close()
+    return seq, last_seq_ts
+
 def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
     args=get_args()
 
@@ -344,6 +449,7 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
         train_adjs = []
         dataLen = 0
         missing_seq = []
+        bigrise_seq = []
 
         for date in data.index.get_level_values("date").unique().sort_values():
             train_seq = data.loc[date].to_numpy().flatten().tolist()
@@ -356,12 +462,18 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
             #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
             train_seqs += [train_seq]
             train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])]]
-            train_adjs += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])/denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["hfq_open"])]]
+            train_adjs += [[1.0/denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["hfq_open"])]]
+            # train_adjs += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])/denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["hfq_open"])]]
 
             if data.loc[date].sum(skipna=False) != data.loc[date].sum(skipna=False):
                 missing_seq += [True]
             else:
                 missing_seq += [False]
+
+            if data.loc[date, "close"] > BIG_RISE:
+                bigrise_seq += [True]
+            else:
+                bigrise_seq += [False]
 
             dataLen += 1
             if dataLen >= predstep:
@@ -371,14 +483,17 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
                     train_label_ts = torch.FloatTensor(train_adjs[-steps]).view(-1)
                 else:
                     train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps+1:].prod(axis=0)).view(-1)
-                if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) == False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False:
+                if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) ==False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False \
+                        and any(bigrise_seq[-RISE_WIN-steps:-steps]):
                     seq.append((train_seq_ts, train_label_ts, code, date.value))
                 else:
-                    print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
-        if any(missing_seq[-seq_len:]) == False:
+                    pass
+                    #print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
+        if any(missing_seq[-seq_len:]) == False and any(bigrise_seq[-RISE_WIN:]):
             last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
         else:
-            print("missing")
+            pass
+            #print("missing")
     if test_pred == True:
         last_seq_ts = MyDataset(last_seq_ts)
         #if not test_pred else 1, drop_last=(not test_pred)
@@ -598,8 +713,10 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     #     mm['min']=n
     #     data_mm.append(mm)
 
-    #dataset. process_stocks_O2toO1
+    #dataset. process_stocks_O2toO1 process_stocks_norm_c2c1
     if ONLY_PREDICT == False:
+        # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
+        # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
         Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set)
         Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set)
         # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
@@ -609,12 +726,15 @@ def nn_stocksdata_seq(batch_size, lstmtype):
         Val = None
 
     if NO_TEST == False:
+        # Dte, _ = process_stocks_norm_c2c1(test,  1, False,data_index_set)
+        # _, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
         Dte, _ = process_stocks_norm(test,  1, False,data_index_set)
         _, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True)
         # Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
     else:
         # Dte = None
+        # Dte, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
         Dte, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True)
         # Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
 
@@ -996,7 +1116,9 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf):
         profit_all1 = 1.0
         profit_topn1 = 1.0
 
-        for date in model_result_dates.keys():
+        sortedDate = list(model_result_dates.keys())
+        sortedDate.sort()
+        for date in sortedDate:
             # date = date.item()
             if args["type"] == "MultiLabelLSTM":
                 result = calculate_metrics(np.array(model_result)[:-args["multi_steps"]], np.array(targets)[:-args["multi_steps"]])
@@ -1153,7 +1275,7 @@ if __name__ == '__main__' :
           "gamma":0.5,
           "epochs":50000,
           "batch_size":64,#batch of data will be push in model. large batch in multi parameter prediction will be better.
-          "seq_len":80, #one contionus series input data will be used to predict the selected parameter.
+          "seq_len":96, #one contionus series input data will be used to predict the selected parameter.
           "multi_steps":2, #next x days's stock price can be predictions. maybe 1,2,3....
           "pred_type":"close",#open price / close price / high price / low price.
           "train_end":1.0,
