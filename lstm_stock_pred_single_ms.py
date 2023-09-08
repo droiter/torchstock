@@ -35,12 +35,17 @@ BK_SIZE = 1 #len(BKS)
 BK_TOPN = 10
 COLS = ["open", "close", "high", "low", "vol"] #, 'buy_sm_vol', 'sell_sm_vol',  'buy_md_vol', 'sell_md_vol', 'buy_lg_vol', 'sell_lg_vol', 'buy_elg_vol', 'sell_elg_vol'] #
 TCH_EARLYSTOP_PATIENCE = 20
-ONLY_PREDICT = True
+# ONLY_PREDICT = True
+NO_TRAIN = False
 NO_TEST = False
+RANGE_NORM = False   #True pred bad
+
 CLOSE_LABEL_THRESHOLD = 0.94
 NP_TOPN = 10
 BIG_RISE = -math.inf #0.6
 RISE_WIN = 5
+LSTM_ADJUST_START = "O"  #"O" "N"
+LSTM_ADJUST_END = "N"  #"O" "N"
 
 DATA_FN_KEY = "zxbintra"
 
@@ -451,11 +456,15 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
         train_seqs = []
         train_labels = []
         train_adjs = []
+        train_adjs_end = []
         dataLen = 0
         missing_seq = []
         bigrise_seq = []
         infos = []
 
+        idxvol_idx = list(data.columns).index("idxvol")
+        vod_idx    = list(data.columns).index("vol")
+        range_norm_list = [vod_idx, idxvol_idx]
         for date in data.index.get_level_values("date").unique().sort_values():
             train_seq = data.loc[date].to_numpy().flatten().tolist()
             # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
@@ -466,13 +475,21 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
             #     close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
             #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
             train_seqs += [train_seq]
-            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])]]
-            if LSTM_ADJUST == "O":
-                train_adjs += [[1.0/(denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["hfq_open"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"]))]]
-            elif LSTM_ADJUST == "L":
-                train_adjs += [[1.0/(denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_FN_KEY]["hfq_low"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"]))]]
+            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_close"]["range"])]]
+
+            if LSTM_ADJUST_START == "O":
+                train_adjs += [[1.0/(denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_open"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_close"]["range"]))]]
+            elif LSTM_ADJUST_START == "L":
+                train_adjs += [[1.0/(denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_low"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_close"]["range"]))]]
             else:
                 train_adjs += [[1.0]]
+
+            if LSTM_ADJUST_END == "O":
+                train_adjs_end += [[denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_open"]["range"])]]
+            elif LSTM_ADJUST_END == "L":
+                train_adjs_end += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_low"]["range"])]]
+            else:
+                train_adjs_end += [[1.0]]
 
             # infos += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_FN_KEY]["hfq_low"]) <= (1.0/denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"]))*0.99]]
             infos += [[True]]
@@ -491,12 +508,17 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
 
             dataLen += 1
             if dataLen >= predstep:
-                train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                npa = np.array(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                if RANGE_NORM == True:
+                    for cidx in range_norm_list:
+                        npa[:, cidx] = (2*npa[:, cidx] - np.max(npa[:, cidx]) - np.min(npa[:, cidx]))/(np.max(npa[:, cidx]) - np.min(npa[:, cidx]))
+                # train_seq_ts = torch.FloatTensor(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                train_seq_ts = torch.FloatTensor(npa)
                 # train_label_ts = torch.FloatTensor(train_labels[-1]).view(-1)
                 if False: #steps == 1:
                     train_label_ts = torch.FloatTensor(train_adjs[-steps]).view(-1)
                 else:
-                    train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)).view(-1)
+                    train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
                 if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) ==False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False \
                         and any(bigrise_seq[-RISE_WIN-steps:-steps]):
                     seq.append((train_seq_ts, train_label_ts, code, date.value, infos[-steps]))
@@ -673,7 +695,7 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
 def nn_stocksdata_seq_split_by_code(batch_size, lstmtype):
     print('data processing...')
 
-    if ONLY_PREDICT == False or NO_TEST == False:
+    if NO_TRAIN == False or NO_TEST == False:
         data_file_name = DATA_ALL_FN
         dataset = load_stocks_data(data_file_name)
         dateFirstIndex = dataset.reset_index().set_index(["date", "exchange", "code"]).sort_index().index
@@ -692,7 +714,7 @@ def nn_stocksdata_seq_split_by_code(batch_size, lstmtype):
         val_date_end = dateFirstIndex[int(all_code_len*algs["val_end"])][0]
         print("train_end", train_date_end, "val_end", val_date_end)
 
-    if ONLY_PREDICT == False:
+    if NO_TRAIN == False:
         if os.path.exists(DATA_TRAIN_FN) and False:
             train = load_stocks_data(DATA_TRAIN_FN)
         else:
@@ -728,7 +750,7 @@ def nn_stocksdata_seq_split_by_code(batch_size, lstmtype):
     #     data_mm.append(mm)
 
     #dataset. process_stocks_O2toO1 process_stocks_norm_c2c1
-    if ONLY_PREDICT == False:
+    if NO_TRAIN == False:
         Dtr, _ = process_stocks_norm(train_val.loc[train_val.index.get_level_values(1).astype(int)%4>0], batch_size, True,data_index_set)
         Val, _ = process_stocks_norm(train_val.loc[train_val.index.get_level_values(1).astype(int)%4==0],   batch_size, True,data_index_set)
         # Dtrval, _ = process_stocks_norm(train_val, batch_size, True,data_index_set)
@@ -763,7 +785,7 @@ def nn_stocksdata_seq_split_by_code(batch_size, lstmtype):
 def nn_stocksdata_seq_random_split(batch_size, lstmtype):
     print('data processing...')
 
-    if ONLY_PREDICT == False or NO_TEST == False:
+    if NO_TRAIN == False or NO_TEST == False:
         data_file_name = DATA_ALL_FN
         dataset = load_stocks_data(data_file_name)
         dateFirstIndex = dataset.reset_index().set_index(["date", "exchange", "code"]).sort_index().index
@@ -782,7 +804,7 @@ def nn_stocksdata_seq_random_split(batch_size, lstmtype):
         val_date_end = dateFirstIndex[int(all_code_len*algs["val_end"])][0]
         print("train_end", train_date_end, "val_end", val_date_end)
 
-    if ONLY_PREDICT == False:
+    if NO_TRAIN == False:
         if os.path.exists(DATA_TRAIN_FN) and False:
             train = load_stocks_data(DATA_TRAIN_FN)
         else:
@@ -818,7 +840,7 @@ def nn_stocksdata_seq_random_split(batch_size, lstmtype):
     #     data_mm.append(mm)
 
     #dataset. process_stocks_O2toO1 process_stocks_norm_c2c1
-    if ONLY_PREDICT == False:
+    if NO_TRAIN == False:
         # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
         Dtrval, _ = process_stocks_norm(train_val, batch_size, True,data_index_set)
@@ -853,7 +875,7 @@ def nn_stocksdata_seq_random_split(batch_size, lstmtype):
 def nn_stocksdata_seq(batch_size, lstmtype):
     print('data processing...')
 
-    if ONLY_PREDICT == False or NO_TEST == False:
+    if NO_TRAIN == False or NO_TEST == False:
         data_file_name = DATA_ALL_FN
         dataset = load_stocks_data(data_file_name)
         dateFirstIndex = dataset.reset_index().set_index(["date", "exchange", "code"]).sort_index().index
@@ -872,7 +894,7 @@ def nn_stocksdata_seq(batch_size, lstmtype):
         val_date_end = dateFirstIndex[int(all_code_len*algs["val_end"])][0]
         print("train_end", train_date_end, "val_end", val_date_end)
 
-    if ONLY_PREDICT == False:
+    if NO_TRAIN == False:
         if os.path.exists(DATA_TRAIN_FN) and False:
             train = load_stocks_data(DATA_TRAIN_FN)
         else:
@@ -908,7 +930,7 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     #     data_mm.append(mm)
 
     #dataset. process_stocks_O2toO1 process_stocks_norm_c2c1
-    if ONLY_PREDICT == False:
+    if NO_TRAIN == False:
         # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
         Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set)
@@ -1110,10 +1132,10 @@ def topn_rank(model_result, targets, topn=1):
         num += 1
     print(f"\nTop {topn} Average Rank is:", (rankAva/num), flush=True)
 
-def pred_stat(lastbest_pred_target):
+def pred_stat(lastbest_pred_target, stage="training"):
     dfList = []
     for s in lastbest_pred_target:
-        df = pandas.DataFrame({"pred":s[0].detach().cpu().numpy().flatten(), "target": s[1].detach().cpu().numpy().flatten()})
+        df = pandas.DataFrame({"pred":s[0], "target": s[1]})
         dfList += [df]
     dfAll = pandas.concat(dfList)
     print(len(dfAll.index))
@@ -1144,7 +1166,7 @@ def pred_stat(lastbest_pred_target):
 
     opDf = dfStat.loc[(dfStat.ava>1.008)&(dfStat.winPrec>0.55)]
     opMin = opDf.vMin.min()
-    print("threshold is", opMin)
+    print(stage, "threshold is", opMin)
     return opMin
 
 #train it.
@@ -1198,7 +1220,7 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
             seq = seq.to(device)
             label = label.to(device)
             y_pred = model(seq)
-            currbest_pred_target += [(y_pred, label)]
+            currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), label.detach().cpu().numpy().flatten())]
             model_result.extend( y_pred.detach().cpu().numpy() )
             targets.extend( label.detach().cpu().numpy() )
             loss = loss_function(y_pred, label)
@@ -1211,7 +1233,7 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
 
         if best_loss is None:
             best_loss = val_loss_all[-1]
-            lastbest_pred_target = currbest_pred_target.copy()
+            lastbest_pred_target = currbest_pred_target
             currbest_pred_target = []
 
         if args["type"] == "MultiLabelLSTM":
@@ -1233,7 +1255,7 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
             print('\r\nSaving models...\r\n', flush=True)
             torch.save(state, path)
             patience = 0
-            lastbest_pred_target = currbest_pred_target.copy()
+            lastbest_pred_target = currbest_pred_target
             currbest_pred_target = []
         elif val_loss_all[-1]>best_loss:
             patience += 1
@@ -1241,12 +1263,12 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
                 break
 
         global TEST_FLAG
-        if TEST_FLAG == True or ONLY_PREDICT == True:
+        if TEST_FLAG == True or NO_TRAIN == True:
             buy_threshold = pred_stat(lastbest_pred_target)
             test(None, Dte, path_file, None, last_seq_ts, None, buy_threshold)
             TEST_FLAG = False
 
-            if ONLY_PREDICT == True:
+            if NO_TRAIN == True:
                 return buy_threshold
 
         train_loss = 0
@@ -1334,6 +1356,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
         targets = []
         model_result = []
         infos = {}
+        currbest_pred_target = []
         for (seq, target, code, date, info) in tqdm(Dte):
             date = date.item()
             if date not in targets_dates:
@@ -1350,6 +1373,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
                 # code_dates[date].extend( code )
                 # model_result.extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], y_pred.detach().cpu().numpy()) )
                 # targets.extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
+                currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), target.detach().cpu().numpy().flatten())]
                 model_result_dates[date].extend( y_pred.detach().cpu().numpy() )
                 targets_dates[date].extend( target.detach().cpu().numpy() )
                 code_dates[date].extend( code )
@@ -1363,6 +1387,8 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
             if len(model_result) == 100:
                 plt.plot(np.array(model_result).T, np.array(targets).T)
                 plt.show()
+
+        pred_stat(currbest_pred_target, stage="test")
 
         idx = 0
         target_means = []
@@ -1396,7 +1422,9 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
                 target_info_means += [np.power(topnclose, topninfo).mean()]
                 target_threshold_means += [topnclose[topnpred > buy_threshold].mean()]
 
-                if idx%(args["multi_steps"]+1) == 0:
+                date_adj = -1 if LSTM_ADJUST_END == "O" else 0
+
+                if idx%(args["multi_steps"]+date_adj) == 0:
                     profit_all *= target_means[-1]
                     profit_info *= target_info_means[-1]
 
@@ -1426,6 +1454,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
 
     fileDict = {"xsy": XSY_FILE_R, "rpe": RPE_FILE_R, "sting": STING_FILE_R,
             "bdt": BDT_FILE_R, "kjyl": KJYL_FILE_R}
+    fileDict = {"kjyl": KJYL_FILE_R}
     filedfList = {}
 
     for file in fileDict:
@@ -1473,6 +1502,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
     print("\ntopn close is:\r\n", topnclose)
 
     typeLists = [["xsy", "rpe", "sting", "kjyl", "bdt"], ["xsy"], ["rpe"], ["sting"], ["kjyl"], ["bdt"]]
+    typeLists = [["kjyl"]]
 
 
     for typeList in typeLists:
@@ -1541,7 +1571,7 @@ if __name__ == '__main__' :
           "hidden_size":int(BK_SIZE*len(COLS)*4),#number of cells in one hidden layer.
           "num_layers":4,  #number of hidden layers in predition module.
           "output_size":BK_SIZE, #number of parameter will be predicted.
-          "lr":1e-5,
+          "lr":3e-4, #1e-5,
           "weight_decay":0.0, #0001,
           "bidirectional":False,
           "type": "LSTM", # BiLSTM, LSTM, MultiLabelLSTM
@@ -1590,13 +1620,17 @@ if __name__ == '__main__' :
     #test cuda
     path_file='./model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl' #Module for the next "x" day's stock price prediction.
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    signal.signal(signal.SIGUSR1, test_signal)
     print("CUDA or CPU:", device)
     #load data to a dataFrame.
     Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq_split_by_code(args['batch_size'], args['type'])
 
     signal.signal(signal.SIGUSR1, test_signal)
     #train it.
-    buy_threshold = train(args, Dtr, Val, path_file, Dte, last_seq_ts)
+    if NO_TRAIN == False:
+        buy_threshold = train(args, Dtr, Val, path_file, Dte, last_seq_ts)
+    else:
+        buy_threshold = 1.03
     #teest it.
     test(args, Dte, path_file, data_pred_index, last_seq_ts, testdf, buy_threshold)
     
