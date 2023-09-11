@@ -33,7 +33,8 @@ BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '88
 #BKS = ["000001", "880367", "399001"]
 BK_SIZE = 1 #len(BKS)
 BK_TOPN = 10
-COLS = ["open", "close", "high", "low", "vol"] #, 'buy_sm_vol', 'sell_sm_vol',  'buy_md_vol', 'sell_md_vol', 'buy_lg_vol', 'sell_lg_vol', 'buy_elg_vol', 'sell_elg_vol'] #
+# COLS = ["open", "close", "high", "low", "vol"] #, 'buy_sm_vol', 'sell_sm_vol',  'buy_md_vol', 'sell_md_vol', 'buy_lg_vol', 'sell_lg_vol', 'buy_elg_vol', 'sell_elg_vol'] #
+# COLS = ["open", "close", "high", "low", "vol", "idxopen", "idxhigh", "idxlow", "idxclose", "idxvol"] #, 'buy_sm_vol', 'sell_sm_vol',  'buy_md_vol', 'sell_md_vol', 'buy_lg_vol', 'sell_lg_vol', 'buy_elg_vol', 'sell_elg_vol'] #
 TCH_EARLYSTOP_PATIENCE = 20
 # ONLY_PREDICT = True
 NO_TRAIN = False
@@ -47,7 +48,13 @@ RISE_WIN = 5
 LSTM_ADJUST_START = "O"  #"O" "N"
 LSTM_ADJUST_END = "N"  #"O" "N"
 
-DATA_FN_KEY = "zxbintra"
+DATA_SETS = ["zxbintra", "zxbzzintra"]
+# DATA_FN_KEY = "zxbintra"
+# DATA_FN_KEY = "zxbintra_zxbzzintra"
+DATA_FN_KEY = "_".join(DATA_SETS)
+
+COLS = ["open", "close", "high", "low", "vol"]
+COLS += [ stockType+c for stockType in DATA_SETS[1:] for c in COLS]
 
 DATA_ALL_FN = f"rlcalc_{DATA_FN_KEY}_all.hdf"
 DATA_TRAIN_FN = f"rlcalc_{DATA_FN_KEY}_train.hdf"
@@ -144,7 +151,9 @@ def load_data(file_name):
     return df 
 
 def load_stocks_data(file_name):
+    global COLS
     df = pd.read_hdf(file_name, "rlcalc")
+    COLS = list(df.columns)
     df = df.reset_index().set_index(["exchange", "code", "date"]).sort_index()
     df = df.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
     df = df.loc[:, COLS]
@@ -367,7 +376,7 @@ def process_stocks_norm_c2c1(dataAll, batch_size, shuffle,data_index_set, test_p
             #     close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
             #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
             train_seqs += [train_seq]
-            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])]]
+            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["hfq_close"])]]
             train_adjs += [[1.0]]
 
             if data.loc[date].sum(skipna=False) != data.loc[date].sum(skipna=False):
@@ -423,11 +432,11 @@ def process_stocks_norm_c2c1(dataAll, batch_size, shuffle,data_index_set, test_p
     pkl_file.close()
     return seq, last_seq_ts
 
-def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
+def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_"):
     args=get_args()
 
-    seq_pkl_name = "torch_stock_seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
-    last_pkl_name = "torch_stock_last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+    seq_pkl_name = "torch_stock_" + stage + "seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+    last_pkl_name = "torch_stock_" + stage + "last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
 
 
     if os.path.exists(seq_pkl_name):
@@ -462,9 +471,12 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
         bigrise_seq = []
         infos = []
 
-        idxvol_idx = list(data.columns).index("idxvol")
-        vod_idx    = list(data.columns).index("vol")
-        range_norm_list = [vod_idx, idxvol_idx]
+        # idxvol_idx = list(data.columns).index("idxvol")
+        # vod_idx    = list(data.columns).index("vol")
+        range_norm_list = []
+        for i in range(len(data.columns)):
+            if "vol" in data.columns[i]:
+                range_norm_list += [i]
         for date in data.index.get_level_values("date").unique().sort_values():
             train_seq = data.loc[date].to_numpy().flatten().tolist()
             # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
@@ -475,26 +487,26 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
             #     close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
             #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
             train_seqs += [train_seq]
-            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_close"]["range"])]]
+            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"])]]
 
             if LSTM_ADJUST_START == "O":
-                train_adjs += [[1.0/(denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_open"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_close"]["range"]))]]
+                train_adjs += [[1.0/(denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_open"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"]))]]
             elif LSTM_ADJUST_START == "L":
-                train_adjs += [[1.0/(denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_low"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_close"]["range"]))]]
+                train_adjs += [[1.0/(denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_low"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"]))]]
             else:
                 train_adjs += [[1.0]]
 
             if LSTM_ADJUST_END == "O":
-                train_adjs_end += [[denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_open"]["range"])]]
+                train_adjs_end += [[denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_open"]["range"])]]
             elif LSTM_ADJUST_END == "L":
-                train_adjs_end += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_FN_KEY]["OHLCV"]["hfq_low"]["range"])]]
+                train_adjs_end += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_low"]["range"])]]
             else:
                 train_adjs_end += [[1.0]]
 
-            # infos += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_FN_KEY]["hfq_low"]) <= (1.0/denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"]))*0.99]]
+            # infos += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["hfq_low"]) <= (1.0/denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["hfq_close"]))*0.99]]
             infos += [[True]]
 
-            # train_adjs += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_FN_KEY]["hfq_close"])/denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_FN_KEY]["hfq_open"])]]
+            # train_adjs += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["hfq_close"])/denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["hfq_open"])]]
 
             if data.loc[date].sum(skipna=False) != data.loc[date].sum(skipna=False):
                 missing_seq += [True]
@@ -751,8 +763,8 @@ def nn_stocksdata_seq_split_by_code(batch_size, lstmtype):
 
     #dataset. process_stocks_O2toO1 process_stocks_norm_c2c1
     if NO_TRAIN == False:
-        Dtr, _ = process_stocks_norm(train_val.loc[train_val.index.get_level_values(1).astype(int)%4>0], batch_size, True,data_index_set)
-        Val, _ = process_stocks_norm(train_val.loc[train_val.index.get_level_values(1).astype(int)%4==0],   batch_size, True,data_index_set)
+        Dtr, _ = process_stocks_norm(train_val.loc[train_val.index.get_level_values(1).astype(int)%4>0], batch_size, True,data_index_set, stage="train_")
+        Val, _ = process_stocks_norm(train_val.loc[train_val.index.get_level_values(1).astype(int)%4==0],   batch_size, True,data_index_set, stage="val_")
         # Dtrval, _ = process_stocks_norm(train_val, batch_size, True,data_index_set)
         # generator = torch.Generator().manual_seed(42)
         # Dtr, Val =  random_split(Dtrval, [0.75, 0.25], generator)
@@ -769,14 +781,14 @@ def nn_stocksdata_seq_split_by_code(batch_size, lstmtype):
     if NO_TEST == False:
         # Dte, _ = process_stocks_norm_c2c1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, _ = process_stocks_norm(test,  1, False,data_index_set)
-        _, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True)
+        Dte, _ = process_stocks_norm(test,  1, False,data_index_set, stage="test_")
+        _, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_")
         # Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
     else:
         # Dte = None
         # Dte, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True)
+        Dte, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_")
         # Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
 
     return Dtr, Val, Dte, last_seq_ts, pred
@@ -1067,7 +1079,7 @@ class LSTM(nn.Module):
         self.output_size = output_size
         self.num_directions = 1 # 单向LSTM
         self.batch_size = batch_size
-        self.lstm = nn.LSTM(self.input_size, self.hidden_size, self.num_layers, batch_first=True)
+        self.lstm = nn.LSTM(input_size = self.input_size, hidden_size = self.hidden_size, num_layers = self.num_layers, batch_first=True, dropout=0.5)
         self.linear = nn.Linear(self.hidden_size, self.output_size)
 
     def forward(self, input_seq):
@@ -1133,6 +1145,7 @@ def topn_rank(model_result, targets, topn=1):
     print(f"\nTop {topn} Average Rank is:", (rankAva/num), flush=True)
 
 def pred_stat(lastbest_pred_target, stage="training"):
+    json_cfg = { "threshold": -1 }
     dfList = []
     for s in lastbest_pred_target:
         df = pandas.DataFrame({"pred":s[0], "target": s[1]})
@@ -1166,6 +1179,12 @@ def pred_stat(lastbest_pred_target, stage="training"):
 
     opDf = dfStat.loc[(dfStat.ava>1.008)&(dfStat.winPrec>0.55)]
     opMin = opDf.vMin.min()
+    if os.path.exists("torch_stock.cfg"):
+        with open('torch_stock.cfg') as cfg_file:
+            json_cfg = json.load(cfg_file)
+
+    if "threshold" in json_cfg and json_cfg["threshold"] > 0:
+        opMin = json_cfg["threshold"]
     print(stage, "threshold is", opMin)
     return opMin
 
