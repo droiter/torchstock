@@ -155,7 +155,7 @@ def load_stocks_data(file_name):
     df = pd.read_hdf(file_name, "rlcalc")
     COLS = list(df.columns)
     df = df.reset_index().set_index(["exchange", "code", "date"]).sort_index()
-    df = df.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
+    # df = df.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
     df = df.loc[:, COLS]
     # df = df.loc[df.index.get_level_values("date") > "2017-1-1", COLS]
     # print(df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"))
@@ -1309,7 +1309,6 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
         else:
             train_loss_all.append(train_loss)
 
-
     #save the best model.
     # state = {'models': best_model.state_dict()}
     # torch.save(state, path)
@@ -1348,7 +1347,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
     output_size = args['output_size']
-    
+
     if args['type'] == "BiLSTM": #lstm, bidirection-lstm, multilabel-lstm
         model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     elif args['type'] == "LSTM":
@@ -1644,7 +1643,6 @@ if __name__ == '__main__' :
     #load data to a dataFrame.
     Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq_split_by_code(args['batch_size'], args['type'])
 
-    signal.signal(signal.SIGUSR1, test_signal)
     #train it.
     if NO_TRAIN == False:
         buy_threshold = train(args, Dtr, Val, path_file, Dte, last_seq_ts)
