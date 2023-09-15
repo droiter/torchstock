@@ -454,6 +454,7 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
 
     dataAll = dataAll.loc[:, COLS]
     dataAll = dataAll.loc[dataAll.index.get_level_values("code") < "300000"] #"300000"
+    dataAll = dataAll.sort_index()
 
     predstep = steps + seq_len
     seq = []
@@ -461,7 +462,7 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
 
     for code in dataAll.index.get_level_values("code").unique():
         data = dataAll.loc[("szse", code)].sort_index()
-        print("proc code", code)
+        # print("proc code", code)
         train_seqs = []
         train_labels = []
         train_adjs = []
@@ -551,6 +552,8 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
             last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
     else:
         last_seq_ts = None
+
+    print(f"---->{stage} size: {len(seq)}")
     seq = MyDataset(seq)
     #if not test_pred else 1, drop_last=(not test_pred)
     if args["type"] == "MultiLabelLSTM":
@@ -702,6 +705,100 @@ def process_bk(data, batch_size, shuffle,data_index_set, test_pred=False):
     seq = MyDataset(seq)
     seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=2, drop_last=(not test_pred))
     return seq, last_seq_ts
+
+# split date and create datasets for train /validate and test.
+def nn_stocksdata_seq_split_by_code_n_date(batch_size, lstmtype):
+    print('data processing...')
+
+    if NO_TRAIN == False or NO_TEST == False:
+        data_file_name = DATA_ALL_FN
+        dataset = load_stocks_data(data_file_name)
+        dateFirstIndex = dataset.reset_index().set_index(["date", "exchange", "code"]).sort_index().index
+        # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
+
+        algs=get_args()
+        #check number of data items in df, if it is too less , we can not train it.
+        algs["train_end"]=0.7
+        algs["val_begin"]=0.7
+        algs["val_end"]=0.8
+        algs["test_begin"]=0.8
+        print("fixme algs")
+
+        all_code_len = len(dateFirstIndex)
+        train_date_end = dateFirstIndex[int(all_code_len*algs["train_end"])][0]
+        val_date_end = dateFirstIndex[int(all_code_len*algs["val_end"])][0]
+        print("train_end", train_date_end, "val_end", val_date_end)
+
+    if NO_TRAIN == False:
+        if os.path.exists(DATA_TRAIN_FN) and False:
+            train = load_stocks_data(DATA_TRAIN_FN)
+        else:
+            print("missing", DATA_TRAIN_FN)
+            # train_val = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
+            train = dataset.loc[(dataset.index.get_level_values(1).astype(int)%7>0) & (dataset.index.get_level_values("date")<=train_date_end)]
+            val0 = dataset.loc[(dataset.index.get_level_values(1).astype(int)%7==0) & (dataset.index.get_level_values("date")<=train_date_end)]
+        # if os.path.exists(DATA_VAL_FN) and False:
+        #     val = load_stocks_data(DATA_VAL_FN)
+        # else:
+        #     print("missing", DATA_VAL_FN)
+        #     val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
+        val1 = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
+        val = pandas.concat([val0, val1])
+
+    if NO_TEST == False:
+        if os.path.exists(DATA_TEST_FN) and False:
+            test = load_stocks_data(DATA_TEST_FN)
+        else:
+            print("missing", DATA_TEST_FN)
+            test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
+
+    if os.path.exists(DATA_PRED_FN):
+        pred = load_stocks_data(DATA_PRED_FN)
+    else:
+        pred = None
+
+    # # split
+    # # train = dataset.iloc[:int(len(dataset.index)/BK_SIZE * algs["train_end"])*BK_SIZE]
+    # # val  = dataset.iloc[int(len(dataset.index)/BK_SIZE * algs["val_begin"])*BK_SIZE:int(len(dataset.index)/BK_SIZE * algs["val_end"])*BK_SIZE]
+    # # test = dataset.iloc[int(len(dataset.index)/BK_SIZE * algs["test_begin"])*BK_SIZE:len(dataset.index)]
+    # for i in range(data_col_bypass,dataset.shape[1]):
+    #     m, n = np.max(dataset[dataset.columns[i]]), np.min(dataset[dataset.columns[i]])
+    #     mm={}
+    #     mm['max']=m
+    #     mm['min']=n
+    #     data_mm.append(mm)
+
+    #dataset. process_stocks_O2toO1 process_stocks_norm_c2c1
+    if NO_TRAIN == False:
+        Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set, stage="train_")
+        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set, stage="val_")
+        # Dtrval, _ = process_stocks_norm(train_val, batch_size, True,data_index_set)
+        # generator = torch.Generator().manual_seed(42)
+        # Dtr, Val =  random_split(Dtrval, [0.75, 0.25], generator)
+        # Dtr = Dtr.dataset
+        # Val = Val.dataset
+        # Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set)
+        # Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set)
+        # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
+        # Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
+    else:
+        Dtr = None
+        Val = None
+
+    if NO_TEST == False:
+        # Dte, _ = process_stocks_norm_c2c1(test,  1, False,data_index_set)
+        # _, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
+        Dte, _ = process_stocks_norm(test,  1, False,data_index_set, stage="test_")
+        _, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_")
+        # Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
+        # _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
+    else:
+        # Dte = None
+        # Dte, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
+        Dte, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_")
+        # Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
+
+    return Dtr, Val, Dte, last_seq_ts, pred
 
 # split date and create datasets for train /validate and test.
 def nn_stocksdata_seq_split_by_code(batch_size, lstmtype):
@@ -1177,7 +1274,7 @@ def pred_stat(lastbest_pred_target, stage="training"):
     dfStat = pandas.DataFrame(vStat)
     print(dfStat)
 
-    opDf = dfStat.loc[(dfStat.ava>1.008)&(dfStat.winPrec>0.55)]
+    opDf = dfStat.loc[(dfStat.index>=(len(dfStat.index)/2))&(dfStat.ava>1.006)&(dfStat.winPrec>0.55)]
     opMin = opDf.vMin.min()
     if os.path.exists("torch_stock.cfg"):
         with open('torch_stock.cfg') as cfg_file:
@@ -1185,6 +1282,8 @@ def pred_stat(lastbest_pred_target, stage="training"):
 
     if "threshold" in json_cfg and json_cfg["threshold"] > 0:
         opMin = json_cfg["threshold"]
+    if opMin != opMin:
+        opMin = 1.01
     print(stage, "threshold is", opMin)
     return opMin
 
@@ -1438,7 +1537,7 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
                 target_topn_means += [topnclose.mean()]
                 target_means += [np.mean(targets_dates[date])]
                 target_info_means += [np.power(topnclose, topninfo).mean()]
-                target_threshold_means += [topnclose[topnpred > buy_threshold].mean()]
+                target_threshold_means += [topnclose[topnpred > buy_threshold].mean() if topnclose[topnpred > buy_threshold].size>0 else 1.0]
 
                 date_adj = -1 if LSTM_ADJUST_END == "O" else 0
 
@@ -1450,8 +1549,9 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
                     #     profit_topn *= target_topn_means[-1]
                     profit_topn *= target_topn_means[-1]
 
-                    if target_threshold_means[-1] == target_threshold_means[-1]:
-                        profit_threshold *= target_threshold_means[-1]
+                    profit_threshold *= target_threshold_means[-1]
+                    # if target_threshold_means[-1] == target_threshold_means[-1]:
+                    #     profit_threshold *= target_threshold_means[-1]
                 else:
                     profit_all1 *= target_means[-1]
                     profit_topn1 *= target_topn_means[-1]
@@ -1459,9 +1559,9 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
                 print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_info, profit_threshold, profit_all1, profit_topn1, np.mean(target_means), np.mean(target_topn_means), np.mean(target_info_means),
                       np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]))
                 topncode = np.take(code_dates[date], topnidx)
-                topnpred = np.take(model_result_dates[date], topnidx)
-                topnclose = np.concatenate((topncode, topnclose, topnpred), axis=1)
-                print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n", topnclose)
+                # topnpred = np.take(model_result_dates[date], topnidx)
+                topnAll = np.concatenate((topncode, topnclose, topnpred), axis=1)
+                print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}\r\n{topnclose}" )
                 idx += 1
 
     RPE_FILE_R = "/home/yacc/shares/rpe_pre.xlsx.colored.xlsx"
@@ -1569,6 +1669,8 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
         plt.legend()
         plt.show()
 
+    pred_stat(currbest_pred_target, stage="test")
+
 def test_signal(_signo, _stack_frame):
     global TEST_FLAG
     print("prepare to test.")
@@ -1641,7 +1743,7 @@ if __name__ == '__main__' :
     signal.signal(signal.SIGUSR1, test_signal)
     print("CUDA or CPU:", device)
     #load data to a dataFrame.
-    Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq_split_by_code(args['batch_size'], args['type'])
+    Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq_split_by_code_n_date(args['batch_size'], args['type'])
 
     #train it.
     if NO_TRAIN == False:
