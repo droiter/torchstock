@@ -43,6 +43,8 @@ NO_TRAIN = False
 NO_TEST = False
 RANGE_NORM = False   #True pred bad
 
+MAX_SEQ_LEN = 128
+
 CLOSE_LABEL_THRESHOLD = 0.94
 NP_TOPN = 10
 BIG_RISE = -math.inf #0.6
@@ -1026,7 +1028,13 @@ def nn_stocksdata_seq(batch_size, lstmtype):
             test = load_stocks_data(DATA_TEST_FN)
         else:
             print("missing", DATA_TEST_FN)
+            args=get_args()
             test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
+            if MAX_SEQ_LEN < args["seq_len"]:
+                print("overflow")
+                sys.exit()
+            test_dates = test.index.get_level_values("date").unique()[MAX_SEQ_LEN-args["seq_len"]]
+            test = test.loc[test.index.get_level_values("date")>test_dates]
 
     if os.path.exists(DATA_PRED_FN):
         pred = load_stocks_data(DATA_PRED_FN)
@@ -1815,7 +1823,7 @@ if __name__ == '__main__' :
     if NO_TRAIN == False:
         buy_threshold = train(args, Dtr, Val, path_file, Dte, last_seq_ts)
     else:
-        buy_threshold = 1.03
+        buy_threshold = math.nan
     #teest it.
     test(args, Dte, path_file, data_pred_index, last_seq_ts, testdf, buy_threshold)
     
