@@ -21,12 +21,14 @@ import lstm_stock_log as log
 import math
 from sklearn.metrics import precision_score, recall_score, f1_score
 from torchsampler import ImbalancedDatasetSampler
-import pickle
+# import pickle
+import _pickle as pickle
 from exp_tools import dfCfg, dfCfgNorm, denorm_fn
 import datetime
 from torch.utils.data import random_split
 # from pytorchtools import EarlyStopping
 import signal
+import bz2
 
 BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '880335', '880344', '880350', '880351', '880355', '880360', '880367', '880372', '880380', '880387', '880390', '880398', '880399', '880400', '880406', '880414', '880418', '880421', '880422', '880423', '880424', '880430', '880431', '880432', '880437', '880440', '880446', '880447', '880448', '880452', '880453', '880454', '880455', '880456', '880459', '880464', '880465', '880471', '880472', '880473', '880474', '880476', '880482', '880489', '880490', '880491', '880492', '880493', '880494', '880497', '399001']
 
@@ -440,12 +442,14 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
 
 
     if os.path.exists(seq_pkl_name):
-        seq_pkl_file = open(seq_pkl_name, "rb")
-        last_pkl_file = open(last_pkl_name, "rb")
-        seq_pkl = pickle.load(seq_pkl_file)
-        last_pkl = pickle.load(last_pkl_file)
-        seq_pkl_file.close()
-        last_pkl_file.close()
+        # seq_pkl_file = open(seq_pkl_name, "rb")
+        # last_pkl_file = open(last_pkl_name, "rb")
+        with bz2.BZ2File(seq_pkl_name, "rb") as seq_pkl_file:
+            seq_pkl = pickle.load(seq_pkl_file)
+        with bz2.BZ2File(last_pkl_name, "rb") as last_pkl_file:
+            last_pkl = pickle.load(last_pkl_file)
+        # seq_pkl_file.close()
+        # last_pkl_file.close()
         return seq_pkl, last_pkl
 
     seq_len=get_args()["seq_len"]
@@ -553,7 +557,7 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
     else:
         last_seq_ts = None
 
-    print(f"---->{stage} size: {len(seq)}")
+    print(f"---->{stage} size: {len(seq)}", list(dataAll.index.get_level_values("date").unique().sort_values())[0], list(dataAll.index.get_level_values("date").unique().sort_values())[-1])
     seq = MyDataset(seq)
     #if not test_pred else 1, drop_last=(not test_pred)
     if args["type"] == "MultiLabelLSTM":
@@ -561,12 +565,14 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
     else:
         seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
 
-    pkl_file = open(seq_pkl_name, "wb")
-    pickle.dump(seq, pkl_file)
-    pkl_file.close()
-    pkl_file = open(last_pkl_name, "wb")
-    pickle.dump(last_seq_ts, pkl_file)
-    pkl_file.close()
+    # pkl_file = open(seq_pkl_name, "wb")
+    with bz2.BZ2File(seq_pkl_name, "wb") as pkl_file:
+        pickle.dump(seq, pkl_file)
+    # pkl_file.close()
+    # pkl_file = open(last_pkl_name, "wb")
+    with bz2.BZ2File(last_pkl_name, "wb") as pkl_file:
+        pickle.dump(last_seq_ts, pkl_file)
+    # pkl_file.close()
     return seq, last_seq_ts
 
 #todo: for C1/O0
@@ -1042,8 +1048,8 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TRAIN == False:
         # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
-        Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set)
-        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set)
+        Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set, stage="train_")
+        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set, stage="val_")
         # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
     else:
@@ -1053,14 +1059,14 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TEST == False:
         # Dte, _ = process_stocks_norm_c2c1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, _ = process_stocks_norm(test,  1, False,data_index_set)
-        _, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True)
+        Dte, _ = process_stocks_norm(test,  1, False,data_index_set, stage="test_")
+        _, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_")
         # Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
     else:
         # Dte = None
         # Dte, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True)
+        Dte, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_")
         # Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
 
     return Dtr, Val, Dte, last_seq_ts, pred
@@ -1141,6 +1147,14 @@ def nn_data_seq(batch_size):
 
     return Dtr, Val, Dte
 
+class LossLogMse(nn.Module):
+    def __init__(self):
+        super(LossLogMse, self).__init__()
+
+    def forward(self, inputs, targets):
+        loss = (torch.pow(math.e, inputs) - torch.pow(math.e, targets))**2
+        return loss.mean()
+
 #nn module.
 class MultiLabelLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, batch_size):
@@ -1166,8 +1180,40 @@ class MultiLabelLSTM(nn.Module):
         pred = pred[:, -1, :]  # (5, 1)
         return pred
 
-#nn module.
 class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, batch_size):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.output_size = output_size
+        self.num_directions = 1 # 单向LSTM
+        self.batch_size = batch_size
+
+        h0 = torch.zeros(self.num_directions * self.num_layers, 1, self.hidden_size).to(device)
+        c0 = torch.zeros(self.num_directions * self.num_layers, 1, self.hidden_size).to(device)
+        nn.init.xavier_normal_(h0, gain=nn.init.calculate_gain('relu'))
+        nn.init.xavier_normal_(c0, gain=nn.init.calculate_gain('relu'))
+        self.h0 = nn.Parameter(h0, requires_grad=True)  # Parameter() to update weights
+        self.c0 = nn.Parameter(c0, requires_grad=True)
+
+        self.lstm = nn.LSTM(input_size = self.input_size, hidden_size = self.hidden_size, num_layers = self.num_layers, batch_first=True, dropout=0.5)
+        self.linear = nn.Linear(self.hidden_size, self.output_size)
+
+    def forward(self, input_seq):
+        batch_size, seq_len = input_seq.shape[0], input_seq.shape[1]
+        # h_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
+        # c_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
+        # h_0 = torch.zeros(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).requires_grad_()
+        # c_0 = torch.zeros(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).requires_grad_()
+        # output(batch_size, seq_len, num_directions * hidden_size)
+        output, _ = self.lstm(input_seq, (self.h0.repeat(1, batch_size, 1), self.c0.repeat(1, batch_size, 1))) # output(5, 30, 64)
+        pred = self.linear(output)  # (5, 24, 1)
+        pred = pred[:, -1, :]  # (5, 1)
+        return pred
+
+#nn module.
+class LSTM_noc0h0(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, batch_size):
         super().__init__()
         self.input_size = input_size
@@ -1181,10 +1227,12 @@ class LSTM(nn.Module):
 
     def forward(self, input_seq):
         batch_size, seq_len = input_seq.shape[0], input_seq.shape[1]
-        h_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
-        c_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
+        # h_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
+        # c_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
+        h_0 = torch.zeros(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).requires_grad_()
+        c_0 = torch.zeros(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).requires_grad_()
         # output(batch_size, seq_len, num_directions * hidden_size)
-        output, _ = self.lstm(input_seq, (h_0, c_0)) # output(5, 30, 64)
+        output, _ = self.lstm(input_seq, (h_0.detach(), c_0.detach())) # output(5, 30, 64)
         pred = self.linear(output)  # (5, 24, 1)
         pred = pred[:, -1, :]  # (5, 1)
         return pred
@@ -1250,17 +1298,18 @@ def pred_stat(lastbest_pred_target, stage="training"):
     dfAll = pandas.concat(dfList)
     print(len(dfAll.index))
     dfAll = dfAll.sort_values("pred")
-    binsize = 10
+    binsize = 20
     dfPredMin = dfAll.pred.min()
     dfPredMax = dfAll.pred.max()
 
     stepSize = (dfPredMax - dfPredMin)/binsize
-    vStat = { "vMin":[], "vMax": [], "ava": [], "winPrec": [], "perc": [], "smpNo": []}
+    vStat = { "vMin":[], "vMax": [], "ava": [], "winPrec": [], "perc": [], "ava2e": [], "winPrec2e": [], "perc2e": [], "smpNo": []}
 
-    for i in range(binsize):
+    for i in range(binsize+1):
         vMin = dfPredMin+i*stepSize
         vMax = dfPredMin+i*stepSize+stepSize
         df = dfAll.loc[(dfAll.pred>=vMin)&(dfAll.pred<vMax)]
+        df2e = dfAll.loc[(dfAll.pred>=vMin)]
         vStat["vMin"] += [vMin]
         vStat["vMax"] += [vMax]
         vStat["ava"] += [df.target.mean()]
@@ -1269,6 +1318,14 @@ def pred_stat(lastbest_pred_target, stage="training"):
         else:
             vStat["winPrec"] += [math.nan]
         vStat["perc"] += [len(df)/len(dfAll)]
+
+        vStat["ava2e"] += [df2e.target.mean()]
+        if len(df2e.index) > 0:
+            vStat["winPrec2e"] += [sum(df2e.target>1)/len(df2e.index)]
+        else:
+            vStat["winPrec2e"] += [math.nan]
+        vStat["perc2e"] += [len(df2e)/len(dfAll)]
+
         vStat["smpNo"] += [len(df)]
 
     dfStat = pandas.DataFrame(vStat)
@@ -1298,7 +1355,8 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
         loss_function = nn.MSELoss().to(device)
     elif args["type"] == 'LSTM':
         model = LSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
-        loss_function = nn.MSELoss().to(device)
+        # loss_function = nn.MSELoss().to(device)
+        loss_function = LossLogMse().to(device)
     else:
         model = MultiLabelLSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.BCELoss().to(device)
@@ -1363,14 +1421,14 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
             topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
             topnclose = np.take(targets, topnidx)
             print("\nAverage close is:", topnclose.mean(), np.mean(targets))
-        print('\nepoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, patience), flush=True)
+        print('epoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, patience), flush=True)
 
         #get the best model.
         if(val_loss_all[-1]<best_loss):
             best_loss=val_loss_all[-1]
             best_model=copy.deepcopy(model)
             state = {'models': best_model.state_dict()}
-            print('\r\nSaving models...\r\n', flush=True)
+            print('Saving models...\r\n', flush=True)
             torch.save(state, path)
             patience = 0
             lastbest_pred_target = currbest_pred_target
@@ -1413,7 +1471,7 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
     # torch.save(state, path)
     
     # plot for loss.
-    if plot :
+    if plot and False:
         x = [i for i in range(1, len(train_loss_all)+1)]
         x_smooth = np.linspace(np.min(x), np.max(x), 1000)
         y_model=make_interp_spline(x, train_loss_all)
@@ -1432,7 +1490,7 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
 
     
 #validate
-def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
+def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold=math.nan):
     
     # m=[];n=[]
     # mn=get_data_maxmin(data_pred_index)
@@ -1501,11 +1559,14 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
                 else:
                     infos[date].extend(info)
 
-            if len(model_result) == 100:
+            if len(model_result) == 100 and False:
                 plt.plot(np.array(model_result).T, np.array(targets).T)
                 plt.show()
 
-        pred_stat(currbest_pred_target, stage="test")
+        buy_threshold_calc = pred_stat(currbest_pred_target, stage="test")
+
+        if buy_threshold != buy_threshold:
+            buy_threshold = buy_threshold_calc
 
         idx = 0
         target_means = []
@@ -1563,6 +1624,8 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold):
                 topnAll = np.concatenate((topncode, topnclose, topnpred), axis=1)
                 print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}\r\n{topnclose}" )
                 idx += 1
+
+        print(datetime.datetime.fromtimestamp(sortedDate[0]/1e9), "--->", datetime.datetime.fromtimestamp(sortedDate[-1]/1e9))
 
     RPE_FILE_R = "/home/yacc/shares/rpe_pre.xlsx.colored.xlsx"
     XSY_FILE_R = "/home/yacc/shares/xsy_pre.xlsx.colored.xlsx"
@@ -1718,6 +1781,8 @@ if __name__ == '__main__' :
     if pred_type =="all" :
         args["output_size"]=4   #for open / close /high/low.
 
+    pd.set_option('display.max_columns', 500)
+    pd.set_option('display.width', 1000)
     torch.set_num_threads(os.cpu_count()-1)
 
     #Data max min.
@@ -1743,7 +1808,8 @@ if __name__ == '__main__' :
     signal.signal(signal.SIGUSR1, test_signal)
     print("CUDA or CPU:", device)
     #load data to a dataFrame.
-    Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq_split_by_code_n_date(args['batch_size'], args['type'])
+    # Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq_split_by_code_n_date(args['batch_size'], args['type'])
+    Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq(args['batch_size'], args['type'])
 
     #train it.
     if NO_TRAIN == False:
