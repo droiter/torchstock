@@ -41,6 +41,7 @@ TCH_EARLYSTOP_PATIENCE = 20
 # ONLY_PREDICT = True
 NO_TRAIN = False
 NO_TEST = False
+DUMP_DATASET_TRAIN_VAL = False
 RANGE_NORM = False   #True pred bad
 
 MAX_SEQ_LEN = 128
@@ -51,6 +52,11 @@ BIG_RISE = -math.inf #0.6
 RISE_WIN = 5
 LSTM_ADJUST_START = "O"  #"O" "N"
 LSTM_ADJUST_END = "N"  #"O" "N"
+
+MODULE_LOAD_BEST = NO_TRAIN
+MODULE_CURRENT_SAVED = None
+MODULE_SAVED_PING = 0
+MODULE_SAVED_PONG = 1
 
 DATA_SETS = ["zxbintra", "zxbzzintra"]
 # DATA_FN_KEY = "zxbintra"
@@ -184,8 +190,8 @@ class MyDataset(Data.Dataset):
     def __len__(self):
         return len(self.data)
 
-    def get_labels(self):
-        return self.labels
+    # def get_labels(self):
+    #     return self.labels
     
 # Create dataset.   
 def process(data, batch_size, shuffle,data_index_set):
@@ -436,7 +442,7 @@ def process_stocks_norm_c2c1(dataAll, batch_size, shuffle,data_index_set, test_p
     pkl_file.close()
     return seq, last_seq_ts
 
-def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_"):
+def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_", dump_file = True):
     args=get_args()
 
     seq_pkl_name = "torch_stock_" + stage + "seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
@@ -567,14 +573,15 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
     else:
         seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
 
-    # pkl_file = open(seq_pkl_name, "wb")
-    with bz2.BZ2File(seq_pkl_name, "wb") as pkl_file:
-        pickle.dump(seq, pkl_file)
-    # pkl_file.close()
-    # pkl_file = open(last_pkl_name, "wb")
-    with bz2.BZ2File(last_pkl_name, "wb") as pkl_file:
-        pickle.dump(last_seq_ts, pkl_file)
-    # pkl_file.close()
+    if dump_file == True:
+        # pkl_file = open(seq_pkl_name, "wb")
+        with bz2.BZ2File(seq_pkl_name, "wb") as pkl_file:
+            pickle.dump(seq, pkl_file)
+        # pkl_file.close()
+        # pkl_file = open(last_pkl_name, "wb")
+        with bz2.BZ2File(last_pkl_name, "wb") as pkl_file:
+            pickle.dump(last_seq_ts, pkl_file)
+        # pkl_file.close()
     return seq, last_seq_ts
 
 #todo: for C1/O0
@@ -1056,8 +1063,8 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TRAIN == False:
         # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
-        Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set, stage="train_")
-        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set, stage="val_")
+        Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set, stage="train_", dump_file=DUMP_DATASET_TRAIN_VAL)
+        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set, stage="val_", dump_file=DUMP_DATASET_TRAIN_VAL)
         # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
     else:
@@ -1353,7 +1360,7 @@ def pred_stat(lastbest_pred_target, stage="training"):
     return opMin
 
 #train it.
-def train(args, Dtr, Val, path, Dte, last_seq_ts):
+def train(args, Dtr, Val, paths, Dte, last_seq_ts):
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
     output_size = args['output_size']
@@ -1376,6 +1383,7 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
         
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args['step_size'], gamma=args['gamma'])
 
+    path, cur_sav_idx = get_module_saved_path(paths, load_best=MODULE_LOAD_BEST)
     if os.path.exists(path):
         print('loading models...')
         model.load_state_dict(torch.load(path)['models'])
@@ -1437,7 +1445,8 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
             best_model=copy.deepcopy(model)
             state = {'models': best_model.state_dict()}
             print('Saving models...\r\n', flush=True)
-            torch.save(state, path)
+            cur_sav_idx += 1
+            torch.save(state, paths[cur_sav_idx%(len(paths))])
             patience = 0
             lastbest_pred_target = currbest_pred_target
             currbest_pred_target = []
@@ -1496,9 +1505,28 @@ def train(args, Dtr, Val, path, Dte, last_seq_ts):
 
     return pred_stat(lastbest_pred_target)
 
-    
+def update_drawback(high, low, profit, maxdrawback):
+    if high < profit:
+        high = profit
+        low = high
+    if low > profit:
+        low = profit
+        drawback = (high-low)/high
+        if drawback > maxdrawback:
+            maxdrawback = drawback
+    return high, low, maxdrawback
+
+def get_module_saved_path(paths, load_best=True):
+    ping_mtime = os.path.getmtime(paths[MODULE_SAVED_PING]) if os.path.exists(paths[MODULE_SAVED_PING]) else 0
+    pong_mtime = os.path.getmtime(paths[MODULE_SAVED_PONG]) if os.path.exists(paths[MODULE_SAVED_PONG]) else 0
+
+    MODULE_CURRENT_SAVED = ((ping_mtime > pong_mtime)^load_best)
+    path = paths[MODULE_CURRENT_SAVED]
+    print("load_best:", load_best, "ping is newest:", (ping_mtime > pong_mtime), "load:", path)
+    return path, MODULE_CURRENT_SAVED
+
 #validate
-def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold=math.nan):
+def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=math.nan):
     
     # m=[];n=[]
     # mn=get_data_maxmin(data_pred_index)
@@ -1519,6 +1547,8 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold=mat
         model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     else:
         model = MultiLabelLSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
+
+    path, _ = get_module_saved_path(paths)
 
     print('loading models...')
     model.load_state_dict(torch.load(path)['models'])
@@ -1590,6 +1620,16 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold=mat
 
         sortedDate = list(model_result_dates.keys())
         sortedDate.sort()
+        profit_mean_high = 1.0
+        profit_mean_low = 1.0
+        profit_mean_drawdown = 0.0
+        profit_topn_high = 1.0
+        profit_topn_low = 1.0
+        profit_topn_drawdown = 0.0
+        profit_threshold_high = 1.0
+        profit_threshold_low = 1.0
+        profit_threshold_drawdown = 0.0
+
         for date in sortedDate:
             # date = date.item()
             if args["type"] == "MultiLabelLSTM":
@@ -1612,25 +1652,31 @@ def test(args, Dte, path,data_pred_index, last_seq_ts, testdf, buy_threshold=mat
 
                 if idx%(args["multi_steps"]+date_adj) == 0:
                     profit_all *= target_means[-1]
+                    profit_mean_high, profit_mean_low, profit_mean_drawdown = update_drawback(profit_mean_high, profit_mean_low, profit_all, profit_mean_drawdown)
                     profit_info *= target_info_means[-1]
 
                     # if topnpred.mean() > 1.02 and True:  #fixme tobe continue
                     #     profit_topn *= target_topn_means[-1]
                     profit_topn *= target_topn_means[-1]
+                    profit_topn_high, profit_topn_low, profit_topn_drawdown = update_drawback(profit_topn_high, profit_topn_low, profit_topn, profit_topn_drawdown)
 
                     profit_threshold *= target_threshold_means[-1]
+                    profit_threshold_high, profit_threshold_low, profit_threshold_drawdown = update_drawback(profit_threshold_high,
+                                                                                                             profit_threshold_low, profit_threshold, profit_threshold_drawdown)
                     # if target_threshold_means[-1] == target_threshold_means[-1]:
                     #     profit_threshold *= target_threshold_means[-1]
                 else:
                     profit_all1 *= target_means[-1]
                     profit_topn1 *= target_topn_means[-1]
 
-                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_info, profit_threshold, profit_all1, profit_topn1, np.mean(target_means), np.mean(target_topn_means), np.mean(target_info_means),
-                      np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]))
+                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_info, profit_threshold,
+                      # profit_all1, profit_topn1,
+                      np.mean(target_means), np.mean(target_topn_means), np.mean(target_info_means),
+                      np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]), profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
                 topncode = np.take(code_dates[date], topnidx)
                 # topnpred = np.take(model_result_dates[date], topnidx)
                 topnAll = np.concatenate((topncode, topnclose, topnpred), axis=1)
-                print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}\r\n{topnclose}" )
+                # print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}\r\n{topnclose}" )
                 idx += 1
 
         print(datetime.datetime.fromtimestamp(sortedDate[0]/1e9), "--->", datetime.datetime.fromtimestamp(sortedDate[-1]/1e9))
@@ -1811,7 +1857,10 @@ if __name__ == '__main__' :
     #save module data to file in the path.
     # path_file='./model/'+'module'+ '-'+ data_file_name +'-'+pred_type+'-0'+ str(args['multi_steps']) +'.pkl' #Module for the next "x" day's stock price prediction.
     #test cuda
-    path_file='./model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}' + '.pkl' #Module for the next "x" day's stock price prediction.
+    path_file= [
+        './model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}.ping' + '.pkl', #Module for the next "x" day's stock price prediction.
+        './model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}.pong' + '.pkl', #Module for the next "x" day's stock price prediction.
+    ]
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     signal.signal(signal.SIGUSR1, test_signal)
     print("CUDA or CPU:", device)
