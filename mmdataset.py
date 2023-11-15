@@ -9,11 +9,12 @@ import torch
 import json
 
 
-DEFAULT_INPUT_FILE_NAME = "mminput.data"
-DEFAULT_LABELS_FILE_NAME = "mmlabels.data"
-DEFAULT_SAMPLES_FILE_NAME = "mmsamples.data"
-DEFAULT_CFG_FILE_NAME = "mmcfg.data"
-DEFAULT_MM_PATH = "mm/"
+DEFAULT_INPUT_FILE_NAME = "mminput.pkl"
+DEFAULT_LABELS_FILE_NAME = "mmlabels.pkl"
+DEFAULT_INFOS_FILE_NAME = "mminfo.pkl"
+DEFAULT_SAMPLES_FILE_NAME = "mmsamples.pkl"
+DEFAULT_CFG_FILE_NAME = "mmcfg.pkl"
+DEFAULT_MM_PATH = "./"
 
 STOCK_CODE_LEN=6
 
@@ -27,18 +28,21 @@ class MMDataset(Dataset):
         size: int = None,
         input_shape: tuple = None,
         label_shape: tuple = None,
-        sample_type: np.dtype = np.dtype('float64'),
+        info_shape: tuple = None,
+        sample_type: np.dtype = np.dtype('float32'),
         transform_fn: Callable[..., Any] = None,
     ) -> None:
         super().__init__()
 
         self.mmap_inputs: np.ndarray = None
         self.mmap_labels: np.ndarray = None
+        self.mmap_infos: np.ndarray = None
         # self.mmap_samples: np.ndarray = None
         self.transform_fn = transform_fn
 
-        self.input_shapes = input_shape
+        self.input_shape = input_shape
         self.label_shape = label_shape
+        self.info_shape = info_shape
         self.size = size
 
         if mmap_path is None:
@@ -52,65 +56,77 @@ class MMDataset(Dataset):
                 self.length = cfg["mmlen"]
                 self.mmap_input_path = cfg["input"]
                 self.mmap_labels_path = cfg["label"]
+                self.mmap_infos_path = cfg["info"]
                 self.size = cfg["size"]
+                self.input_shape = cfg["input_shape"]
+                self.label_shape = cfg["label_shape"]
+                self.info_shape = cfg["info_shape"]
                 remove_existing = False
         else:
             self.length = 0
             self.mmap_input_path = os.path.join(mmap_path, "_".join([seq_name, DEFAULT_INPUT_FILE_NAME]))
             self.mmap_labels_path = os.path.join(mmap_path, "_".join([seq_name, DEFAULT_LABELS_FILE_NAME]))
+            self.mmap_infos_path = os.path.join(mmap_path, "_".join([seq_name, DEFAULT_INFOS_FILE_NAME]))
             remove_existing = True
             # self.mmap_samples_path = os.path.join(mmap_path, DEFAULT_SAMPLES_FILE_NAME)
 
         self.mmap_inputs = self._init_mmap(
-            self.mmap_input_path, sample_type, (size, *input_shape), remove_existing=remove_existing
+            self.mmap_input_path, sample_type, (self.size, *self.input_shape), remove_existing=remove_existing
         )
         self.mmap_labels = self._init_mmap(
-            self.mmap_labels_path, sample_type, (size, *label_shape), remove_existing=remove_existing
+            self.mmap_labels_path, sample_type, (self.size, *self.label_shape), remove_existing=remove_existing
         )
-        print("shape", self.mmap_input_path, sample_type, (size, *input_shape), (size, *label_shape))
+        self.mmap_infos = self._init_mmap(
+            self.mmap_infos_path, sample_type, (self.size, *self.info_shape), remove_existing=remove_existing
+        )
+        print("shape", self.mmap_input_path, sample_type, (self.size, *self.input_shape), (self.size, *self.label_shape),
+              (self.size, *self.info_shape))
 
-    def map(self, idx, input, label):
-        print("map", self.mmap_input_path, idx, self.mmap_inputs.shape, input.shape, label.shape)
+    def map(self, idx, input, label, info):
+        # print("map", self.mmap_input_path, idx, self.mmap_inputs.shape, self.mmap_inputs.dtype, input.shape, input.dtype, len(label))
         self.mmap_inputs[idx][:] = input[:]
         self.mmap_labels[idx][:] = label[:]
+        self.mmap_infos[idx][:] = info[:]
         self.length = max(self.length, idx+1)
 
     def save(self):
         print("save", self.mmap_input_path)
         self.mmap_inputs.flush()
         self.mmap_labels.flush()
-        with open('data.json', 'w') as f:
-            json.dump({ "mmlen": self.length, "size": self.size, "input":self.mmap_input_path, "label":self.mmap_labels_path }, f)
+        self.mmap_infos.flush()
+        with open(self.mmap_cfg_path, 'w') as f:
+            json.dump({ "mmlen": self.length, "size": self.size, "input":self.mmap_input_path, "label":self.mmap_labels_path, "info":self.mmap_infos_path,
+                        "input_shape": self.input_shape, "label_shape": self.label_shape, "info_shape": self.info_shape}, f)
 
     def __getitem__(self, idx: int) -> Tuple[np.ndarray, torch.Tensor, ]:
         # if self.transform_fn:
         #     return self.transform_fn(self.mmap_inputs[idx]), torch.tensor(self.mmap_labels[idx])
-        print("get", self.mmap_input_path, idx)
-        return torch.FloatTensor(self.mmap_inputs[idx]), torch.FloatTensor([self.mmap_labels[idx][0]]), \
-               str(self.mmap_labels[idx][1]).zfill(STOCK_CODE_LEN), int(self.mmap_labels[idx][2]), self.mmap_labels[idx][3]>0
+        # print("get", self.mmap_input_path, self.length, self.size, idx, "\r\n", self.mmap_inputs[idx][::17], self.mmap_labels[idx])
+        return torch.FloatTensor(self.mmap_inputs[idx]), torch.FloatTensor(self.mmap_labels[idx]), \
+               str(self.mmap_infos[idx][0]).zfill(STOCK_CODE_LEN), int(self.mmap_infos[idx][1]), self.mmap_infos[idx][2]>0
 
 
     def __len__(self) -> int:
         return self.length
 
 
-    def _consume_iterable(self, input_iter: Iterable[np.ndarray], labels_iter: Iterable[np.ndarray]) -> Tuple[List[np.ndarray]]:
-        inputs = []
-        labels = []
-
-        for input, label in zip(input_iter, labels_iter):
-            inputs.append(input)
-            labels.append(label)
-
-        if len(inputs) != len(labels):
-            raise Exception(
-                f"Input samples count {len(inputs)} is different than the labels count {len(labels)}"
-            )
-
-        if not isinstance(inputs[0], np.ndarray):
-            raise TypeError("Inputs and labels must be of type np.ndarray")
-
-        return inputs, labels
+    # def _consume_iterable(self, input_iter: Iterable[np.ndarray], labels_iter: Iterable[np.ndarray]) -> Tuple[List[np.ndarray]]:
+    #     inputs = []
+    #     labels = []
+    #
+    #     for input, label in zip(input_iter, labels_iter):
+    #         inputs.append(input)
+    #         labels.append(label)
+    #
+    #     if len(inputs) != len(labels):
+    #         raise Exception(
+    #             f"Input samples count {len(inputs)} is different than the labels count {len(labels)}"
+    #         )
+    #
+    #     if not isinstance(inputs[0], np.ndarray):
+    #         raise TypeError("Inputs and labels must be of type np.ndarray")
+    #
+    #     return inputs, labels
 
 
     def _mkdir(self, path: str) -> None:
@@ -127,7 +143,7 @@ class MMDataset(Dataset):
 
 
     def _init_mmap(self, path: str, dtype: np.dtype, shape: Tuple[int], remove_existing: bool = False) -> np.ndarray:
-        open_mode = "w+" if remove_existing else "r"
+        open_mode = "w+" if remove_existing else "r+"
         return np.memmap(
             path,
             dtype=dtype,

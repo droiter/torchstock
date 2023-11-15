@@ -29,6 +29,9 @@ from torch.utils.data import random_split
 # from pytorchtools import EarlyStopping
 import signal
 import bz2
+from mmdataset import MMDataset
+import random
+from itertools import chain
 
 BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '880335', '880344', '880350', '880351', '880355', '880360', '880367', '880372', '880380', '880387', '880390', '880398', '880399', '880400', '880406', '880414', '880418', '880421', '880422', '880423', '880424', '880430', '880431', '880432', '880437', '880440', '880446', '880447', '880448', '880452', '880453', '880454', '880455', '880456', '880459', '880464', '880465', '880471', '880472', '880473', '880474', '880476', '880482', '880489', '880490', '880491', '880492', '880493', '880494', '880497', '399001']
 
@@ -41,10 +44,14 @@ TCH_EARLYSTOP_PATIENCE = 20
 # ONLY_PREDICT = True
 NO_TRAIN = False
 NO_TEST = False
-DUMP_DATASET_TRAIN_VAL = False
+DUMP_DATASET_TRAIN_VAL_PKL = True
 RANGE_NORM = False   #True pred bad
 
+TORCH_REPRODUCIBILITY = False
+reproduct_args = {}
+
 MAX_SEQ_LEN = 128
+LABEL_INFO_LEN = 3 #label, code, date, info
 
 CLOSE_LABEL_THRESHOLD = 0.94
 NP_TOPN = 10
@@ -185,6 +192,7 @@ class MyDataset(Data.Dataset):
         self.labels = [ x[1].item() for x in data ]
 
     def __getitem__(self, item):
+        #print(len(self.data), item, "\r\n", self.data[item][0].numpy()[::34], self.data[item][1].numpy())
         return self.data[item]
 
     def __len__(self):
@@ -442,7 +450,28 @@ def process_stocks_norm_c2c1(dataAll, batch_size, shuffle,data_index_set, test_p
     pkl_file.close()
     return seq, last_seq_ts
 
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+def reproducibility_init():
+    global reproduct_args
+    if TORCH_REPRODUCIBILITY == True:
+        seed = 0
+        torch.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.use_deterministic_algorithms(True)
+        g = torch.Generator()
+        g.manual_seed(0)
+        reproduct_args = {
+            "worker_init_fn": seed_worker,
+            "generator": g
+        }
+
 def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_", dump_file = True):
+    global reproduct_args
     args=get_args()
 
     seq_pkl_name = "torch_stock_" + stage + "seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
@@ -559,9 +588,9 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
         last_seq_ts = MyDataset(last_seq_ts)
         #if not test_pred else 1, drop_last=(not test_pred)
         if args["type"] == "MultiLabelLSTM":
-            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, **reproduct_args, drop_last=False) #shuffle=shuffle,
         else:
-            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, drop_last=False) #shuffle=shuffle,
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, **reproduct_args, drop_last=False) #shuffle=shuffle,
     else:
         last_seq_ts = None
 
@@ -569,9 +598,9 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
     seq = MyDataset(seq)
     #if not test_pred else 1, drop_last=(not test_pred)
     if args["type"] == "MultiLabelLSTM":
-        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(seq), num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(seq), num_workers=0, **reproduct_args,drop_last=(not test_pred)) #shuffle=shuffle,
     else:
-        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+        seq = DataLoader(dataset=seq, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, **reproduct_args,drop_last=(not test_pred)) #shuffle=shuffle,
 
     if dump_file == True:
         # pkl_file = open(seq_pkl_name, "wb")
@@ -582,6 +611,150 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
         with bz2.BZ2File(last_pkl_name, "wb") as pkl_file:
             pickle.dump(last_seq_ts, pkl_file)
         # pkl_file.close()
+    return seq, last_seq_ts
+
+def process_stocks_norm_mmdataset(dataAll, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_", dump_file = True):
+    global reproduct_args
+    args=get_args()
+
+    seq_pkl_name = "torch_stock_" + stage + "seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' #+ '.pkl'
+    last_pkl_name = "torch_stock_" + stage + "last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+
+    if os.path.exists(f"{seq_pkl_name}_mmcfg.pkl"):
+        mmdataset = MMDataset(seq_name=seq_pkl_name)
+        if args["type"] == "MultiLabelLSTM":
+            seq_pkl = DataLoader(dataset=mmdataset, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(mmdataset), num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+        else:
+            seq_pkl = DataLoader(dataset=mmdataset, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+        with bz2.BZ2File(last_pkl_name, "rb") as last_pkl_file:
+            last_pkl = pickle.load(last_pkl_file)
+        return seq_pkl, last_pkl
+
+    seq_len=get_args()["seq_len"]
+    steps=args["multi_steps"]
+    dataAll = dataAll.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
+
+    dataAll = dataAll.loc[:, COLS]
+    dataAll = dataAll.loc[dataAll.index.get_level_values("code") < "300000"] #"300000"
+    dataAll = dataAll.sort_index()
+
+    predstep = steps + seq_len
+    seq = []
+    last_seq_ts = []
+
+    mmdataset = MMDataset(seq_name=seq_pkl_name, size=len(dataAll.index), input_shape=(seq_len, len(dataAll.columns)), label_shape=(args["output_size"], ), info_shape=(LABEL_INFO_LEN, ))
+    mmdataset_idx = 0
+
+    for code in dataAll.index.get_level_values("code").unique():
+        data = dataAll.loc[("szse", code)].sort_index()
+        # print("proc code", code)
+        train_seqs = []
+        train_labels = []
+        train_adjs = []
+        train_adjs_end = []
+        dataLen = 0
+        missing_seq = []
+        bigrise_seq = []
+        infos = []
+
+        # idxvol_idx = list(data.columns).index("idxvol")
+        # vod_idx    = list(data.columns).index("vol")
+        range_norm_list = []
+        for i in range(len(data.columns)):
+            if "vol" in data.columns[i]:
+                range_norm_list += [i]
+        for date in data.index.get_level_values("date").unique().sort_values():
+            train_seq = data.loc[date].to_numpy().flatten().tolist()
+            # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            # train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            # if args["type"] != "MultiLabelLSTM":
+            #     train_label = data.loc[date, "close"].to_numpy().flatten().tolist()
+            # else:
+            #     close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            train_seqs += [train_seq]
+            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"])]]
+
+            if LSTM_ADJUST_START == "O":
+                train_adjs += [[1.0/(denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_open"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"]))]]
+            elif LSTM_ADJUST_START == "L":
+                train_adjs += [[1.0/(denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_low"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"]))]]
+            else:
+                train_adjs += [[1.0]]
+
+            if LSTM_ADJUST_END == "O":
+                train_adjs_end += [[denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_open"]["range"])]]
+            elif LSTM_ADJUST_END == "L":
+                train_adjs_end += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_low"]["range"])]]
+            else:
+                train_adjs_end += [[1.0]]
+
+            # infos += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["hfq_low"]) <= (1.0/denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["hfq_close"]))*0.99]]
+            infos += [[True]]
+
+            # train_adjs += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["hfq_close"])/denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["hfq_open"])]]
+
+            if data.loc[date].sum(skipna=False) != data.loc[date].sum(skipna=False):  #fixme performance
+                missing_seq += [True]
+            else:
+                missing_seq += [False]
+
+            if data.loc[date, "close"] > BIG_RISE:
+                bigrise_seq += [True]
+            else:
+                bigrise_seq += [False]
+
+            dataLen += 1
+            if dataLen >= predstep:
+                npa = np.array(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                if RANGE_NORM == True:
+                    for cidx in range_norm_list:
+                        npa[:, cidx] = (2*npa[:, cidx] - np.max(npa[:, cidx]) - np.min(npa[:, cidx]))/(np.max(npa[:, cidx]) - np.min(npa[:, cidx]))
+                #train_seq_ts = torch.FloatTensor(npa)
+                #if False: #steps == 1:
+                #    train_label_ts = torch.FloatTensor(train_adjs[-steps]).view(-1)
+                #else:
+                #    train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
+
+                if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) ==False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False \
+                        and any(bigrise_seq[-RISE_WIN-steps:-steps]):
+                    # seq.append((train_seq_ts, train_label_ts, code, date.value, infos[-steps]))
+                    mmdataset.map(mmdataset_idx, npa, train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1],
+                                                       np.array([float(code), float(date.value), float(infos[-steps][0])]))
+                    mmdataset_idx += 1
+                else:
+                    pass
+                    #print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
+        if any(missing_seq[-seq_len:]) == False and any(bigrise_seq[-RISE_WIN:]):
+            train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
+            last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+        else:
+            pass
+            #print("missing")
+    mmdataset.save()
+    if test_pred == True:
+        last_seq_ts = MyDataset(last_seq_ts)
+        #if not test_pred else 1, drop_last=(not test_pred)
+        if args["type"] == "MultiLabelLSTM":
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, **reproduct_args, drop_last=False) #shuffle=shuffle,
+        else:
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, **reproduct_args, drop_last=False) #shuffle=shuffle,
+    else:
+        last_seq_ts = None
+
+    print(f"---->{stage} size: {len(mmdataset)}", list(dataAll.index.get_level_values("date").unique().sort_values())[0], list(dataAll.index.get_level_values("date").unique().sort_values())[-1])
+    # seq = MyDataset(seq)
+    #if not test_pred else 1, drop_last=(not test_pred)
+    if args["type"] == "MultiLabelLSTM":
+        seq = DataLoader(dataset=mmdataset, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(mmdataset), num_workers=0, **reproduct_args, drop_last=(not test_pred)) #shuffle=shuffle,
+    else:
+        seq = DataLoader(dataset=mmdataset, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, **reproduct_args,drop_last=(not test_pred)) #shuffle=shuffle,
+
+    # if dump_file == True:
+    #     with bz2.BZ2File(seq_pkl_name, "wb") as pkl_file:
+    #         pickle.dump(seq, pkl_file)
+    with bz2.BZ2File(last_pkl_name, "wb") as pkl_file:
+        pickle.dump(last_seq_ts, pkl_file)
     return seq, last_seq_ts
 
 #todo: for C1/O0
@@ -1001,7 +1174,7 @@ def nn_stocksdata_seq(batch_size, lstmtype):
 
     if NO_TRAIN == False or NO_TEST == False:
         data_file_name = DATA_ALL_FN
-        dataset = load_stocks_data(data_file_name)
+        dataset = load_stocks_data(data_file_name).astype('float32')
         dateFirstIndex = dataset.reset_index().set_index(["date", "exchange", "code"]).sort_index().index
         # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
 
@@ -1063,8 +1236,8 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TRAIN == False:
         # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
-        Dtr, _ = process_stocks_norm(train, batch_size, True,data_index_set, stage="train_", dump_file=DUMP_DATASET_TRAIN_VAL)
-        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set, stage="val_", dump_file=DUMP_DATASET_TRAIN_VAL)
+        Dtr, _ = process_stocks_norm_mmdataset(train, batch_size, True,data_index_set, stage="train_", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)  #process_stocks_norm_mmdataset
+        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set, stage="val_", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)
         # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
     else:
@@ -1194,6 +1367,28 @@ class MultiLabelLSTM(nn.Module):
         pred = self.sigmoid(output)  # (5, 24, 1)
         pred = pred[:, -1, :]  # (5, 1)
         return pred
+
+class MLPX(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, batch_size):
+        super().__init__()
+        self.input_size = input_size
+        self.num_layers = num_layers
+        self.output_size = output_size
+        self.batch_size = batch_size
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.Dropout(0.5),
+            nn.ReLU(),
+            *(chain.from_iterable([[nn.Linear(hidden_size, hidden_size), nn.Dropout(0.5), nn.ReLU()] for i in range(num_layers)])),
+            nn.Linear(hidden_size, output_size)
+        )
+
+    def forward(self, input_seq):
+        # input_seq = input_seq.view(input_seq.size(0), -1)
+        input_seq = torch.flatten(input_seq, start_dim=1, end_dim=2)
+        output = self.mlp(input_seq) # output(5, 30, 64)
+        return output
 
 class LSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, batch_size):
@@ -1364,12 +1559,17 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
     output_size = args['output_size']
+    seq_len = args['seq_len']
     
     if args["type"] == 'BiLSTM':
         model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
     elif args["type"] == 'LSTM':
         model = LSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
+        # loss_function = nn.MSELoss().to(device)
+        loss_function = LossLogMse().to(device)
+    elif args["type"] == 'MLPX':
+        model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
         # loss_function = nn.MSELoss().to(device)
         loss_function = LossLogMse().to(device)
     else:
@@ -1387,6 +1587,14 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
     if os.path.exists(path):
         print('loading models...')
         model.load_state_dict(torch.load(path)['models'])
+
+    # best_model=copy.deepcopy(model)
+    # state = {'models': best_model.state_dict()}
+    # print('Saving models...\r\n', flush=True)
+    # cur_sav_idx += 1
+    # torch.save(state, paths[cur_sav_idx%(len(paths))])
+    # cur_sav_idx += 1
+    # torch.save(state, paths[cur_sav_idx%(len(paths))])
 
     # training
     best_model = None
@@ -1540,11 +1748,14 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
     output_size = args['output_size']
+    seq_len = args['seq_len']
 
     if args['type'] == "BiLSTM": #lstm, bidirection-lstm, multilabel-lstm
         model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     elif args['type'] == "LSTM":
         model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
+    elif args["type"] == 'MLPX':
+        model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
     else:
         model = MultiLabelLSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
 
@@ -1838,6 +2049,7 @@ if __name__ == '__main__' :
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
     torch.set_num_threads(os.cpu_count()-1)
+    reproducibility_init()
 
     #Data max min.
     data_mm=[]
