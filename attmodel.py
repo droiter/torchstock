@@ -228,7 +228,7 @@ class AttnDecoder(nn.Module):
 
 
 class AutoEncForecast(nn.Module):
-    def __init__(self, config, input_size):
+    def __init__(self, input_size, seq_len, hidden_size, num_layers, output_size, batch_size):
         """
         Initialize the network.
 
@@ -236,6 +236,17 @@ class AutoEncForecast(nn.Module):
             config:
             input_size: (int): size of the input
         """
+        config = {
+            'hidden_size_encoder': hidden_size,
+            'hidden_size_decoder': hidden_size,
+            'output_size': output_size,
+            'num_layers': num_layers,
+            'seq_len': seq_len,
+            'input_att': False,
+            'temporal_att': True,
+            'directions': 1,
+            'denoising': False,
+        }
         super(AutoEncForecast, self).__init__()
         self.encoder = AttnEncoder(config, input_size).to(device) if config['input_att'] else \
             Encoder(config, input_size).to(device)
