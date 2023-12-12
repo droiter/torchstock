@@ -18,12 +18,13 @@ MODULE_CURRENT_SAVED = None
 MODULE_SAVED_PING = 0
 MODULE_SAVED_PONG = 1
 
-LSTM_SEQ_LEN = 7
-LSTM_TRAIN_LEN = 3000
-LSTM_VAL_LEN = 1000
-LSTM_DTE_LEN = 1000
+LSTM_SEQ_LEN = 30
+LSTM_TRAIN_LEN = 10000
+LSTM_VAL_LEN = 3000
+LSTM_DTE_LEN = 3000
+LSTM_STEPS = 100
 
-TCH_EARLYSTOP_PATIENCE = 0
+TCH_EARLYSTOP_PATIENCE = 20
 
 class MyDataset(Data.Dataset):
     def __init__(self, data):
@@ -74,41 +75,56 @@ class LSTM(nn.Module):
 
 def do_calc(x):
     # return math.sin(x*0.001*math.pi*math.pi)
-    return math.cos(x*0.002*math.pi*math.pi)*math.sin(x*0.001*math.pi*math.pi)
+    return math.cos(4*x/(LSTM_TRAIN_LEN*1.0)*math.pi)*math.sin(x*0.001*math.pi*math.pi)
 
 def nn_stocksdata_seq():
     args = get_args()
     print('data processing...')
+    plot_data = []
+    xs = []
     seqs = []
     start = 0
     for i in range(start, start+LSTM_TRAIN_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
+        plot_data += target
+        xs += [i]
         inputs_ts = torch.FloatTensor(np.array(inputs)) #.view(-1)
         target_ts = torch.FloatTensor(np.array(target)).view(-1)
-        seqs += [(inputs_ts, target_ts)]
+        seqs += [(inputs_ts, target_ts, i)]
+    plotResult(plot_data, plot_data, xs)
     seq = MyDataset(seqs)
-    Dtr = DataLoader(dataset=seq, batch_size=64, num_workers=0, drop_last=True)
+    Dtr = DataLoader(dataset=seq, batch_size=64, shuffle=True , num_workers=0, drop_last=True)
 
+    plot_data = []
+    xs = []
     seqs = []
     start = i
     for i in range(start, start+LSTM_VAL_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
+        plot_data += target
+        xs += [i]
         inputs_ts = torch.FloatTensor(np.array(inputs)) #.view(-1)
         target_ts = torch.FloatTensor(np.array(target)).view(-1)
-        seqs += [(inputs_ts, target_ts)]
+        seqs += [(inputs_ts, target_ts, i)]
+    plotResult(plot_data, plot_data, xs)
     seq = MyDataset(seqs)
-    Val = DataLoader(dataset=seq, batch_size=64, num_workers=0, drop_last=True)
+    Val = DataLoader(dataset=seq, batch_size=64, shuffle=True, num_workers=0, drop_last=True)
 
+    plot_data = []
+    xs = []
     seqs = []
     start = i
     for i in range(start, start+LSTM_DTE_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
+        plot_data += target
+        xs += [i]
         inputs_ts = torch.FloatTensor(np.array(inputs)) #.view(-1)
         target_ts = torch.FloatTensor(np.array(target)).view(-1)
-        seqs += [(inputs_ts, target_ts)]
+        seqs += [(inputs_ts, target_ts, i)]
+    plotResult(plot_data, plot_data, xs)
     seq = MyDataset(seqs)
     Dte = DataLoader(dataset=seq, batch_size=1, shuffle=False, num_workers=0, drop_last=True)
 
@@ -144,8 +160,8 @@ def train(args, Dtr, Val, paths):
 
     path, cur_sav_idx = get_module_saved_path(paths, load_best=MODULE_LOAD_BEST)
     if os.path.exists(path):
-        print('loading models...no!')
-        # model.load_state_dict(torch.load(path)['models'])
+        print('loading models...yes!')
+        model.load_state_dict(torch.load(path)['models'])
 
     # training
     best_model = None
@@ -166,14 +182,16 @@ def train(args, Dtr, Val, paths):
         num_item=0
         targets = []
         model_result = []
+        xs = []
         model.eval()
-        for (seq, label) in Val:
+        for (seq, label, x) in Val:
             seq = seq.to(device)
             label = label.to(device)
             y_pred = model(seq)
             currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), label.detach().cpu().numpy().flatten())]
-            model_result.extend( y_pred.detach().cpu().numpy() )
-            targets.extend( label.detach().cpu().numpy() )
+            model_result.extend( [*(y_pred.detach().cpu().numpy().flatten())] )
+            targets.extend( [*(label.detach().cpu().numpy().flatten())] )
+            xs += [*(x.detach().cpu().numpy())]
             loss = loss_function(y_pred, label)
             val_loss+=loss.item()*len(y_pred)
             num_item+=len(y_pred)
@@ -200,6 +218,8 @@ def train(args, Dtr, Val, paths):
             patience = 0
             lastbest_pred_target = currbest_pred_target
             currbest_pred_target = []
+            if len(val_loss_all)%1 == 0:
+                plotResult(model_result, targets, xs)
         elif val_loss_all[-1]>best_loss:
             patience += 1
             if patience > TCH_EARLYSTOP_PATIENCE:
@@ -207,11 +227,17 @@ def train(args, Dtr, Val, paths):
 
         train_loss = 0
         num_item=0
+        targets = []
+        model_result = []
+        xs = []
         model.train()
-        for (seq, label) in Dtr:
+        for (seq, label, x) in Dtr:
             seq = seq.to(device)
             label = label.to(device)
             y_pred = model(seq)
+            model_result.extend( [*(y_pred.detach().cpu().numpy().flatten())] )
+            targets.extend( [*(label.detach().cpu().numpy().flatten())] )
+            xs += [*(x.detach().cpu().numpy())]
             loss = loss_function(y_pred, label)
             train_loss+=loss.item()*len(y_pred)
             num_item+=len(y_pred)
@@ -223,6 +249,8 @@ def train(args, Dtr, Val, paths):
             train_loss_all.append(train_loss/num_item)
         else:
             train_loss_all.append(train_loss)
+        if epoch%2 == 0:
+            plotResult(model_result, targets, xs)
 
 def test(args, Dte, paths):
     args=get_args()
@@ -252,38 +280,54 @@ def test(args, Dte, paths):
     if not NO_TEST:
         targets = []
         model_result = []
+        xs = []
         # currbest_pred_target = []
-        for (seq, target) in tqdm(Dte):
-            y=np.append(y,target.numpy(),axis=0)
+        for (seq, target, x) in tqdm(Dte):
+            # y=np.append(y,target.numpy(),axis=0)
+            label = target.to(device)
             seq = seq.to(device)
             with torch.no_grad():
                 y_pred = model(seq)
                 # currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), target.detach().cpu().numpy().flatten())]
-                model_result.extend( y_pred.detach().cpu().numpy() )
-                targets.extend( target.detach().cpu().numpy() )
+                targets.extend( [*(label.detach().cpu().numpy().flatten())] )
+                model_result.extend( [*(y_pred.detach().cpu().numpy().flatten())] )
+                xs += [*(x.detach().cpu().numpy())]
 
             # if len(model_result) == 100 and False:
             #     plt.plot(np.array(model_result).T, np.array(targets).T)
             #     plt.show()
 
     if True:
-        plt.plot(model_result, linestyle = 'dotted', color='green')
-        # x = []
-        # for i in range(0,len(targets)):
-        #     x.append(i)
-        # plt.scatter(x, targets, linestyle = 'dotted')
-        plt.plot(targets, linestyle = 'dotted', color='blue')
-        plt.grid(axis='y')
-        plt.legend()
-        plt.show()
+        plotResult(model_result, targets, xs)
+        # plt.plot(model_result, linestyle = 'dotted', color='green')
+        # # x = []
+        # # for i in range(0,len(targets)):
+        # #     x.append(i)
+        # # plt.scatter(x, targets, linestyle = 'dotted')
+        # plt.plot(targets, linestyle = 'dotted', color='blue')
+        # plt.grid(axis='y')
+        # plt.legend()
+        # plt.show()
+
+def plotResult(pred, targets, x):
+    plt.scatter(x, pred, marker=".", s=1, linewidth=0)
+    # plt.plot(x, pred, linestyle = 'dotted', color='green')
+    # x = []
+    # for i in range(0,len(targets)):
+    #     x.append(i)
+    plt.scatter(x, targets, marker=".", s=1, linewidth=0 )
+    # plt.plot(x, targets, linestyle = 'dotted', color='blue')
+    plt.grid(axis='y')
+    # plt.legend()
+    plt.show()
 
 if __name__ == '__main__':
     args={
           "input_size":1, #number of input parameters used in predition. you can modify it in data index list.
           "hidden_size":10,#number of cells in one hidden layer.
-          "num_layers":3,  #number of hidden layers in predition module.
+          "num_layers":4,  #number of hidden layers in predition module.
           "output_size":1, #number of parameter will be predicted.
-          "lr":1e-3, #1e-5,
+          "lr":3e-4, #1e-5,
           "weight_decay":0.0, #0001,
           "bidirectional":False,
           "type": "LSTM", # BiLSTM, LSTM, MultiLabelLSTM, MLPX
@@ -293,7 +337,7 @@ if __name__ == '__main__':
           "epochs":50000,
           "batch_size":64,#batch of data will be push in model. large batch in multi parameter prediction will be better.
           "seq_len":LSTM_SEQ_LEN, #one contionus series input data will be used to predict the selected parameter.
-          "multi_steps":6, #next x days's stock price can be predictions. maybe 1,2,3....
+          "multi_steps":LSTM_STEPS, #next x days's stock price can be predictions. maybe 1,2,3....
           "pred_type":"close",#open price / close price / high price / low price.
           "train_end":1.0,
           "val_begin":0.6,
