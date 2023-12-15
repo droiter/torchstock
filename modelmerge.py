@@ -240,7 +240,7 @@ def train(args, Dtr, Val, paths):
     seq_len = args['seq_len']
 
     if args["type"] == 'LSTM':
-        model = LSTM(  input_size[0][0], hidden_size[0][0], num_layers[0][0], output_size, batch_size=args['batch_size']).to(device)
+        model = LSTM(  input_size[EXP_MODS_LSTM_IDX][0], hidden_size[EXP_MODS_LSTM_IDX][0], num_layers[EXP_MODS_LSTM_IDX][0], output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
 
     if args["type"] == 'LSTMs':
@@ -357,7 +357,7 @@ def test(args, Dte, paths):
     seq_len = args['seq_len']
 
     if args['type'] == "LSTM":
-        model = LSTM(input_size[0], hidden_size[0], num_layers[0], output_size, batch_size=1).to(device)
+        model = LSTM(input_size[EXP_MODS_LSTM_IDX][0], hidden_size[EXP_MODS_LSTM_IDX][0], num_layers[EXP_MODS_LSTM_IDX][0], output_size, batch_size=1).to(device)
 
     if args["type"] == 'LSTMs':
         model = LSTMs(  input_size, hidden_size, num_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
