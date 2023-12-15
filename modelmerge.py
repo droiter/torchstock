@@ -25,6 +25,7 @@ LSTM_VAL_LEN = 3000
 LSTM_DTE_LEN = 3000
 LSTM_STEPS = 100
 LSTM_SEC_MODEL_SEQ_LEN = 25
+LSTM_THD_MODEL_MLP_STEP = 10
 
 TCH_EARLYSTOP_PATIENCE = 20
 
@@ -42,7 +43,8 @@ class MyDataset(Data.Dataset):
 
     # def get_labels(self):
     #     return self.labels
-
+EXP_MODS_LSTM_IDX = 0
+EXP_MODS_MLP_IDX = 1
 class LSTMs(nn.Module):
     def __init__(self, input_sizes, hidden_sizes, num_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size):
         super().__init__()
@@ -55,26 +57,39 @@ class LSTMs(nn.Module):
         self.h0s = None
         self.c0s = None
         self.lstms = None
+        self.imlp = None
 
         lstmList = []
         h0s = []
         c0s = []
-        for i in range(len(self.input_sizes)):
-            h0 = torch.zeros(self.num_directions * self.num_layers[i], 1, self.hidden_sizes[i]).to(device)
-            c0 = torch.zeros(self.num_directions * self.num_layers[i], 1, self.hidden_sizes[i]).to(device)
+        for i in range(len(self.input_sizes[EXP_MODS_LSTM_IDX])):
+            h0 = torch.zeros(self.num_directions * self.num_layers[EXP_MODS_LSTM_IDX][i], 1, self.hidden_sizes[EXP_MODS_LSTM_IDX][i]).to(device)
+            c0 = torch.zeros(self.num_directions * self.num_layers[EXP_MODS_LSTM_IDX][i], 1, self.hidden_sizes[EXP_MODS_LSTM_IDX][i]).to(device)
             nn.init.xavier_normal_(h0, gain=nn.init.calculate_gain('relu'))
             nn.init.xavier_normal_(c0, gain=nn.init.calculate_gain('relu'))
             h0s += [nn.Parameter(h0, requires_grad=True)]  # Parameter() to update weights
             c0s += [nn.Parameter(c0, requires_grad=True)]
 
-            lstmList += [nn.LSTM(input_size = self.input_sizes[i], hidden_size = self.hidden_sizes[i], num_layers = self.num_layers[i], batch_first=True, dropout=0.5)]
+            lstmList += [nn.LSTM(input_size = self.input_sizes[EXP_MODS_LSTM_IDX][i],
+                                 hidden_size = self.hidden_sizes[EXP_MODS_LSTM_IDX][i],
+                                 num_layers = self.num_layers[EXP_MODS_LSTM_IDX][i], batch_first=True, dropout=0.5)]
 
         self.lstms = nn.ModuleList(lstmList)
         self.h0s = nn.ParameterList(h0s)
         self.c0s = nn.ParameterList(c0s)
 
+        if input_sizes[EXP_MODS_MLP_IDX] > 0:
+            self.imlp = nn.Sequential()
+            self.imlp.add_module("iLI", nn.Linear(self.input_sizes[EXP_MODS_MLP_IDX], self.hidden_sizes[EXP_MODS_MLP_IDX]))
+            self.imlp.add_module("RI", nn.ReLU())
+            for i in range(merged_num_mid_layers):
+                self.imlp.add_module(f"iL{i}", nn.Linear(self.hidden_sizes[EXP_MODS_MLP_IDX], self.hidden_sizes[EXP_MODS_MLP_IDX]))
+                self.imlp.add_module(f"iR{i}", nn.ReLU())
+            # self.mlp.add_module(f"RO", nn.ReLU())
+            # self.mlp.add_module(f"iLO", nn.Linear(merged_hidden_size, output_size))
+
         self.mlp = nn.Sequential()
-        self.mlp.add_module("LI", nn.Linear(sum(self.hidden_sizes), merged_hidden_size))
+        self.mlp.add_module("LI", nn.Linear(sum(self.hidden_sizes[EXP_MODS_LSTM_IDX])+self.hidden_sizes[EXP_MODS_MLP_IDX], merged_hidden_size))
         self.mlp.add_module("RI", nn.ReLU())
         for i in range(merged_num_mid_layers):
             self.mlp.add_module(f"L{i}", nn.Linear(merged_hidden_size, merged_hidden_size))
@@ -82,20 +97,24 @@ class LSTMs(nn.Module):
         # self.mlp.add_module(f"RO", nn.ReLU())
         self.mlp.add_module(f"LO", nn.Linear(merged_hidden_size, output_size))
 
-    def forward(self, lstm_input_seqs, mlp_input_seqs=None):
-        batch_size, seq_len = lstm_input_seqs[0].shape[0], lstm_input_seqs[0].shape[1]
+    def forward(self, lstm_input_seqs, mlp_input_seqs=[]):
+        batch_size, seq_len = lstm_input_seqs[EXP_MODS_LSTM_IDX][0].shape[0], lstm_input_seqs[EXP_MODS_LSTM_IDX][0].shape[1]
         # h_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
         # c_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
         # h_0 = torch.zeros(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).requires_grad_()
         # c_0 = torch.zeros(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).requires_grad_()
         # output(batch_size, seq_len, num_directions * hidden_size)
         outputs = []
+        mlpoutput = []
         for i in range(len(self.lstms)):
-            output, _ = self.lstms[i](lstm_input_seqs[i], (self.h0s[i].repeat(1, batch_size, 1), self.c0s[i].repeat(1, batch_size, 1))) # output(5, 30, 64)
+            output, _ = self.lstms[i](lstm_input_seqs[EXP_MODS_LSTM_IDX][i], (self.h0s[i].repeat(1, batch_size, 1), self.c0s[i].repeat(1, batch_size, 1))) # output(5, 30, 64)
             # output = self.linears[i](output)
             outputs += [output]
 
-        x = torch.cat([output[:, -1, :] for output in outputs], dim=1)
+        if self.input_sizes[EXP_MODS_MLP_IDX] > 0:
+            mlpoutput += [self.imlp(lstm_input_seqs[EXP_MODS_MLP_IDX][0])]
+
+        x = torch.cat([output[:, -1, :] for output in outputs] + [output for output in mlpoutput], dim=1)
         pred = self.mlp(x)  # (5, 24, 1)
         # pred = pred[:, -1, :]  # (5, 1)
         return pred
@@ -121,7 +140,7 @@ class LSTM(nn.Module):
         self.linear = nn.Linear(self.hidden_size, self.output_size)
 
     def forward(self, input_seq):
-        input_seq = input_seq[0]
+        input_seq = input_seq[EXP_MODS_LSTM_IDX][0]
         batch_size, seq_len = input_seq.shape[0], input_seq.shape[1]
         # h_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
         # c_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
@@ -147,13 +166,15 @@ def nn_stocksdata_seq():
     for i in range(start, start+LSTM_TRAIN_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         inputs2 = [ [do_calc(i+args["seq_len"]+j)] for j in range(LSTM_SEC_MODEL_SEQ_LEN)]
+        inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
         plot_data += target
         xs += [i]
         inputs_ts = torch.FloatTensor(np.array(inputs)) #.view(-1)
         inputs_ts2 = torch.FloatTensor(np.array(inputs2)) #.view(-1)
+        inputs_ts3 = torch.FloatTensor(np.array(inputs3)).view(-1)
         target_ts = torch.FloatTensor(np.array(target)).view(-1)
-        seqs += [(inputs_ts, inputs_ts2, target_ts, i)]
+        seqs += [((inputs_ts, inputs_ts2), (inputs_ts3, ), target_ts, i)]
     plotResult(plot_data, plot_data, xs)
     seq = MyDataset(seqs)
     Dtr = DataLoader(dataset=seq, batch_size=64, shuffle=True , num_workers=0, drop_last=True)
@@ -165,13 +186,15 @@ def nn_stocksdata_seq():
     for i in range(start, start+LSTM_VAL_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         inputs2 = [ [do_calc(i+args["seq_len"]+j)] for j in range(LSTM_SEC_MODEL_SEQ_LEN)]
+        inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
         plot_data += target
         xs += [i]
         inputs_ts = torch.FloatTensor(np.array(inputs)) #.view(-1)
         inputs_ts2 = torch.FloatTensor(np.array(inputs2)) #.view(-1)
+        inputs_ts3 = torch.FloatTensor(np.array(inputs3)).view(-1)
         target_ts = torch.FloatTensor(np.array(target)).view(-1)
-        seqs += [(inputs_ts, inputs_ts2, target_ts, i)]
+        seqs += [((inputs_ts, inputs_ts2), (inputs_ts3, ), target_ts, i)]
     plotResult(plot_data, plot_data, xs)
     seq = MyDataset(seqs)
     Val = DataLoader(dataset=seq, batch_size=64, shuffle=True, num_workers=0, drop_last=True)
@@ -183,13 +206,15 @@ def nn_stocksdata_seq():
     for i in range(start, start+LSTM_DTE_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         inputs2 = [ [do_calc(i+args["seq_len"]+j)] for j in range(LSTM_SEC_MODEL_SEQ_LEN)]
+        inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
         plot_data += target
         xs += [i]
         inputs_ts = torch.FloatTensor(np.array(inputs)) #.view(-1)
         inputs_ts2 = torch.FloatTensor(np.array(inputs2)) #.view(-1)
+        inputs_ts3 = torch.FloatTensor(np.array(inputs3)).view(-1)
         target_ts = torch.FloatTensor(np.array(target)).view(-1)
-        seqs += [(inputs_ts, inputs_ts2, target_ts, i)]
+        seqs += [((inputs_ts, inputs_ts2), (inputs_ts3, ), target_ts, i)]
     plotResult(plot_data, plot_data, xs)
     seq = MyDataset(seqs)
     Dte = DataLoader(dataset=seq, batch_size=1, shuffle=False, num_workers=0, drop_last=True)
@@ -215,7 +240,7 @@ def train(args, Dtr, Val, paths):
     seq_len = args['seq_len']
 
     if args["type"] == 'LSTM':
-        model = LSTM(  input_size[0], hidden_size[0], num_layers[0], output_size, batch_size=args['batch_size']).to(device)
+        model = LSTM(  input_size[0][0], hidden_size[0][0], num_layers[0][0], output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
 
     if args["type"] == 'LSTMs':
@@ -256,11 +281,10 @@ def train(args, Dtr, Val, paths):
         model_result = []
         xs = []
         model.eval()
-        for (seq, seq2, label, x) in Val:
-            seq = seq.to(device)
-            seq2 = seq2.to(device)
+        for seqs in Val:
+            label, x = seqs[-2], seqs[-1]
             label = label.to(device)
-            y_pred = model([seq, seq2])
+            y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
             currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), label.detach().cpu().numpy().flatten())]
             model_result.extend( [*(y_pred.detach().cpu().numpy().flatten())] )
             targets.extend( [*(label.detach().cpu().numpy().flatten())] )
@@ -304,11 +328,10 @@ def train(args, Dtr, Val, paths):
         model_result = []
         xs = []
         model.train()
-        for (seq, seq2, label, x) in Dtr:
-            seq = seq.to(device)
-            seq2 = seq2.to(device)
+        for seqs in Dtr:
+            label, x = seqs[-2], seqs[-1]
             label = label.to(device)
-            y_pred = model([seq, seq2])
+            y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
             model_result.extend( [*(y_pred.detach().cpu().numpy().flatten())] )
             targets.extend( [*(label.detach().cpu().numpy().flatten())] )
             xs += [*(x.detach().cpu().numpy())]
@@ -362,13 +385,13 @@ def test(args, Dte, paths):
         model_result = []
         xs = []
         # currbest_pred_target = []
-        for (seq, seq2, target, x) in tqdm(Dte):
+        for seqs in tqdm(Dte):
             # y=np.append(y,target.numpy(),axis=0)
+            target = seqs[-2]
+            x = seqs[-1]
             label = target.to(device)
-            seq = seq.to(device)
-            seq2 = seq2.to(device)
             with torch.no_grad():
-                y_pred = model([seq, seq2])
+                y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
                 # currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), target.detach().cpu().numpy().flatten())]
                 targets.extend( [*(label.detach().cpu().numpy().flatten())] )
                 model_result.extend( [*(y_pred.detach().cpu().numpy().flatten())] )
@@ -405,9 +428,9 @@ def plotResult(pred, targets, x):
 
 if __name__ == '__main__':
     args={
-          "input_size":[1, 1], #number of input parameters used in predition. you can modify it in data index list.
-          "hidden_size":[10, 9],#number of cells in one hidden layer.
-          "num_layers":[3, 3],  #number of hidden layers in predition module.
+          "input_size":[[1, 1], 1], #number of input parameters used in predition. you can modify it in data index list.
+          "hidden_size":[[10, 9], 8],#number of cells in one hidden layer.
+          "num_layers":[[4, 3], 2],  #number of hidden layers in predition module.
           "merged_hidden_size": 8,
           "merged_num_mid_layers": 2,
           "output_size":1, #number of parameter will be predicted.
