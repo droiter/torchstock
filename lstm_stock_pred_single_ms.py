@@ -32,6 +32,8 @@ import bz2
 from mmdataset import MMDataset
 import random
 from itertools import chain
+from tsai.models.RNNAttention import LSTMAttention
+# import tsai.models.RNNAttention
 
 BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '880335', '880344', '880350', '880351', '880355', '880360', '880367', '880372', '880380', '880387', '880390', '880398', '880399', '880400', '880406', '880414', '880418', '880421', '880422', '880423', '880424', '880430', '880431', '880432', '880437', '880440', '880446', '880447', '880448', '880452', '880453', '880454', '880455', '880456', '880459', '880464', '880465', '880471', '880472', '880473', '880474', '880476', '880482', '880489', '880490', '880491', '880492', '880493', '880494', '880497', '399001']
 
@@ -71,7 +73,11 @@ DATA_SETS = ["zxbintra", "zxbzzintra"]
 DATA_FN_KEY = "_".join(DATA_SETS)
 
 COLS = ["open", "close", "high", "low", "vol"]
-COLS += [ stockType+c for stockType in DATA_SETS[1:] for c in COLS]
+# COLS += [ stockType+c for stockType in DATA_SETS[1:] for c in COLS]
+# COLS += [ stockType + ohlv[len("hfq_"):] if ohlv.startswith("hfq_") else stockType + ohlv  for ohlv in dfCfgNorm[stockType]["OHLCV"].keys() for stockType in DATA_SETS[1:] ]
+for stockType in DATA_SETS[1:]:
+    for ohlv in dfCfgNorm[stockType]["OHLCV"].keys():
+        COLS += [stockType + ohlv[len("hfq_"):] if ohlv.startswith("hfq_") else stockType + ohlv]
 
 DATA_ALL_FN = f"rlcalc_{DATA_FN_KEY}_all.hdf"
 DATA_TRAIN_FN = f"rlcalc_{DATA_FN_KEY}_train.hdf"
@@ -474,8 +480,8 @@ def process_stocks_norm(dataAll, batch_size, shuffle,data_index_set, test_pred=F
     global reproduct_args
     args=get_args()
 
-    seq_pkl_name = "torch_stock_" + stage + "seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
-    last_pkl_name = "torch_stock_" + stage + "last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+    seq_pkl_name = "torch_stock_" + stage + "seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+    last_pkl_name = "torch_stock_" + stage + "last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
 
 
     if os.path.exists(seq_pkl_name):
@@ -617,8 +623,8 @@ def process_stocks_norm_mmdataset(dataAll, batch_size, shuffle,data_index_set, t
     global reproduct_args
     args=get_args()
 
-    seq_pkl_name = "torch_stock_" + stage + "seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' #+ '.pkl'
-    last_pkl_name = "torch_stock_" + stage + "last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+    seq_pkl_name = "torch_stock_" + stage + "seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["output_size"]}-{args["multi_steps"]}' #+ '.pkl'
+    last_pkl_name = "torch_stock_" + stage + "last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
 
     if os.path.exists(f"{seq_pkl_name}_mmcfg.pkl"):
         mmdataset = MMDataset(seq_name=seq_pkl_name)
@@ -1566,12 +1572,16 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         loss_function = nn.MSELoss().to(device)
     elif args["type"] == 'LSTM':
         model = LSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
-        # loss_function = nn.MSELoss().to(device)
-        loss_function = LossLogMse().to(device)
+        loss_function = nn.MSELoss().to(device)
+        # loss_function = LossLogMse().to(device)
     elif args["type"] == 'MLPX':
         model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
-        # loss_function = nn.MSELoss().to(device)
-        loss_function = LossLogMse().to(device)
+        loss_function = nn.MSELoss().to(device)
+        # loss_function = LossLogMse().to(device)
+    elif args["type"] == 'RA':
+        model = LSTMAttention(input_size, output_size, seq_len, hidden_size, num_layers,  rnn_dropout=0.5, encoder_dropout=0.5, fc_dropout=0.5).to(device)
+        loss_function = nn.MSELoss().to(device)
+        # loss_function = LossLogMse().to(device)
     else:
         model = MultiLabelLSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.BCELoss().to(device)
@@ -1652,8 +1662,8 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
             best_loss=val_loss_all[-1]
             best_model=copy.deepcopy(model)
             state = {'models': best_model.state_dict()}
-            print('Saving models...\r\n', flush=True)
             cur_sav_idx += 1
+            print('Saving models...\r\n', paths[cur_sav_idx%(len(paths))], flush=True)
             torch.save(state, paths[cur_sav_idx%(len(paths))])
             patience = 0
             lastbest_pred_target = currbest_pred_target
@@ -1756,6 +1766,10 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     elif args["type"] == 'MLPX':
         model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
+    elif args["type"] == 'RA':
+        model = LSTMAttention(input_size, output_size, seq_len, hidden_size, num_layers,  rnn_dropout=0.5, encoder_dropout=0.5, fc_dropout=0.5).to(device)
+        # loss_function = nn.MSELoss().to(device)
+        # loss_function = LossLogMse().to(device)
     else:
         model = MultiLabelLSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
 
