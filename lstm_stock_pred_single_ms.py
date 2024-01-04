@@ -29,7 +29,7 @@ from torch.utils.data import random_split
 # from pytorchtools import EarlyStopping
 import signal
 import bz2
-from mmdataset import MMDataset
+from mmdataset import MMDataset, PklDataset
 import random
 from itertools import chain
 from tsai.models.RNNAttention import LSTMAttention
@@ -763,6 +763,150 @@ def process_stocks_norm_mmdataset(dataAll, batch_size, shuffle,data_index_set, t
         pickle.dump(last_seq_ts, pkl_file)
     return seq, last_seq_ts
 
+def process_stocks_norm_dataset(dataAll, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_", dataset_type="PklDataset", dump_file = True):
+    global reproduct_args
+    args=get_args()
+
+    seq_pkl_name = "torch_stock_" + stage + dataset_type + "_seq_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["output_size"]}-{args["multi_steps"]}' #+ '.pkl'
+    last_pkl_name = "torch_stock_" + stage + dataset_type + "_last_" + str(len(dataAll)) + f"_{dataAll.index[-1][1]}_{dataAll.index[-1][2].date()}_" + args['type'] + '-bk' + f'-{args["input_size"]}-{args["output_size"]}-{args["multi_steps"]}' + '.pkl'
+
+    if os.path.exists(f"{seq_pkl_name}_mmcfg.pkl"):
+        mmdataset = globals()[dataset_type](seq_name=seq_pkl_name)
+        if args["type"] == "MultiLabelLSTM":
+            seq_pkl = DataLoader(dataset=mmdataset, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(mmdataset), num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+        else:
+            seq_pkl = DataLoader(dataset=mmdataset, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, drop_last=(not test_pred)) #shuffle=shuffle,
+        with bz2.BZ2File(last_pkl_name, "rb") as last_pkl_file:
+            last_pkl = pickle.load(last_pkl_file)
+        return seq_pkl, last_pkl
+
+    seq_len=get_args()["seq_len"]
+    steps=args["multi_steps"]
+    dataAll = dataAll.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
+
+    dataAll = dataAll.loc[:, COLS]
+    dataAll = dataAll.loc[dataAll.index.get_level_values("code") < "300000"] #"300000"
+    dataAll = dataAll.sort_index()
+
+    predstep = steps + seq_len
+    seq = []
+    last_seq_ts = []
+
+    mmdataset = globals()[dataset_type](seq_name=seq_pkl_name, size=len(dataAll.index), input_shape=(seq_len, len(dataAll.columns)), label_shape=(args["output_size"], ), info_shape=(LABEL_INFO_LEN, ))
+    mmdataset_idx = 0
+
+    for code in dataAll.index.get_level_values("code").unique():
+        data = dataAll.loc[("szse", code)].sort_index()
+        # print("proc code", code)
+        train_seqs = []
+        train_labels = []
+        train_adjs = []
+        train_adjs_end = []
+        dataLen = 0
+        missing_seq = []
+        bigrise_seq = []
+        infos = []
+
+        # idxvol_idx = list(data.columns).index("idxvol")
+        # vod_idx    = list(data.columns).index("vol")
+        range_norm_list = []
+        for i in range(len(data.columns)):
+            if "vol" in data.columns[i]:
+                range_norm_list += [i]
+        for date in data.index.get_level_values("date").unique().sort_values():
+            train_seq = data.loc[date].to_numpy().flatten().tolist()
+            # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            # train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            # if args["type"] != "MultiLabelLSTM":
+            #     train_label = data.loc[date, "close"].to_numpy().flatten().tolist()
+            # else:
+            #     close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
+            #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
+            train_seqs += [train_seq]
+            train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"])]]
+
+            if LSTM_ADJUST_START == "O":
+                train_adjs += [[1.0/(denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_open"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"]))]]
+            elif LSTM_ADJUST_START == "L":
+                train_adjs += [[1.0/(denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_low"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"]))]]
+            else:
+                train_adjs += [[1.0]]
+
+            if LSTM_ADJUST_END == "O":
+                train_adjs_end += [[denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_open"]["range"])]]
+            elif LSTM_ADJUST_END == "L":
+                train_adjs_end += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_low"]["range"])]]
+            else:
+                train_adjs_end += [[1.0]]
+
+            # infos += [[denorm_fn(data.loc[date, "low"], dfCfgNorm[DATA_SETS[0]]["hfq_low"]) <= (1.0/denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["hfq_close"]))*0.99]]
+            infos += [[True]]
+
+            # train_adjs += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["hfq_close"])/denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["hfq_open"])]]
+
+            if data.loc[date].sum(skipna=False) != data.loc[date].sum(skipna=False):  #fixme performance
+                missing_seq += [True]
+            else:
+                missing_seq += [False]
+
+            if data.loc[date, "close"] > BIG_RISE:
+                bigrise_seq += [True]
+            else:
+                bigrise_seq += [False]
+
+            dataLen += 1
+            if dataLen >= predstep:
+                npa = np.array(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                if RANGE_NORM == True:
+                    for cidx in range_norm_list:
+                        npa[:, cidx] = (2*npa[:, cidx] - np.max(npa[:, cidx]) - np.min(npa[:, cidx]))/(np.max(npa[:, cidx]) - np.min(npa[:, cidx]))
+                #train_seq_ts = torch.FloatTensor(npa)
+                #if False: #steps == 1:
+                #    train_label_ts = torch.FloatTensor(train_adjs[-steps]).view(-1)
+                #else:
+                #    train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
+
+                if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) ==False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False \
+                        and any(bigrise_seq[-RISE_WIN-steps:-steps]):
+                    # seq.append((train_seq_ts, train_label_ts, code, date.value, infos[-steps]))
+                    mmdataset.map(mmdataset_idx, npa, train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1],
+                                                       np.array([float(code), float(date.value), float(infos[-steps][0])]))
+                    mmdataset_idx += 1
+                else:
+                    pass
+                    #print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
+        if any(missing_seq[-seq_len:]) == False and any(bigrise_seq[-RISE_WIN:]):
+            train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
+            last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+        else:
+            pass
+            #print("missing")
+    mmdataset.save()
+    if test_pred == True:
+        last_seq_ts = MyDataset(last_seq_ts)
+        #if not test_pred else 1, drop_last=(not test_pred)
+        if args["type"] == "MultiLabelLSTM":
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, **reproduct_args, drop_last=False) #shuffle=shuffle,
+        else:
+            last_seq_ts = DataLoader(dataset=last_seq_ts, batch_size= 1, shuffle=False, num_workers=0, **reproduct_args, drop_last=False) #shuffle=shuffle,
+    else:
+        last_seq_ts = None
+
+    print(f"---->{stage} size: {len(mmdataset)}", list(dataAll.index.get_level_values("date").unique().sort_values())[0], list(dataAll.index.get_level_values("date").unique().sort_values())[-1])
+    # seq = MyDataset(seq)
+    #if not test_pred else 1, drop_last=(not test_pred)
+    if args["type"] == "MultiLabelLSTM":
+        seq = DataLoader(dataset=mmdataset, batch_size=batch_size if not test_pred else 1, sampler=ImbalancedDatasetSampler(mmdataset), num_workers=0, **reproduct_args, drop_last=(not test_pred)) #shuffle=shuffle,
+    else:
+        seq = DataLoader(dataset=mmdataset, batch_size=batch_size if not test_pred else 1, shuffle=shuffle, num_workers=0, **reproduct_args,drop_last=(not test_pred)) #shuffle=shuffle,
+
+    # if dump_file == True:
+    #     with bz2.BZ2File(seq_pkl_name, "wb") as pkl_file:
+    #         pickle.dump(seq, pkl_file)
+    with bz2.BZ2File(last_pkl_name, "wb") as pkl_file:
+        pickle.dump(last_seq_ts, pkl_file)
+    return seq, last_seq_ts
+
 #todo: for C1/O0
 def process_stocks(dataAll, batch_size, shuffle,data_index_set, test_pred=False):
     args=get_args()
@@ -1242,8 +1386,8 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TRAIN == False:
         # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
-        Dtr, _ = process_stocks_norm_mmdataset(train, batch_size, True,data_index_set, stage="train_", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)  #process_stocks_norm_mmdataset
-        Val, _ = process_stocks_norm(val,   batch_size, True,data_index_set, stage="val_", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)
+        Dtr, _ = process_stocks_norm_dataset(train, batch_size, True,data_index_set, stage="train_", dataset_type="MMDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)  #process_stocks_norm_mmdataset
+        Val, _ = process_stocks_norm_dataset(val,   batch_size, True,data_index_set, stage="val_", dataset_type="PklDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)
         # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
     else:
@@ -1253,14 +1397,14 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TEST == False:
         # Dte, _ = process_stocks_norm_c2c1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, _ = process_stocks_norm(test,  1, False,data_index_set, stage="test_")
-        _, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_")
+        Dte, _ = process_stocks_norm_dataset(test,  1, False,data_index_set, stage="test_", dataset_type="PklDataset")
+        _, last_seq_ts = process_stocks_norm_dataset(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="PklDataset")
         # Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
     else:
         # Dte = None
         # Dte, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, last_seq_ts = process_stocks_norm(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_")
+        Dte, last_seq_ts = process_stocks_norm_dataset(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="PklDataset")
         # Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
 
     return Dtr, Val, Dte, last_seq_ts, pred
