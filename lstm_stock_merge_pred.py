@@ -34,6 +34,9 @@ import random
 from itertools import chain
 from tsai.models.RNNAttention import LSTMAttention
 # import tsai.models.RNNAttention
+from torchmetrics.regression import R2Score
+from modelmerge import LSTMs
+from nn_macro import *
 
 BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '880335', '880344', '880350', '880351', '880355', '880360', '880367', '880372', '880380', '880387', '880390', '880398', '880399', '880400', '880406', '880414', '880418', '880421', '880422', '880423', '880424', '880430', '880431', '880432', '880437', '880440', '880446', '880447', '880448', '880452', '880453', '880454', '880455', '880456', '880459', '880464', '880465', '880471', '880472', '880473', '880474', '880476', '880482', '880489', '880490', '880491', '880492', '880493', '880494', '880497', '399001']
 
@@ -86,6 +89,17 @@ DATA_TEST_FN = f"rlcalc_{DATA_FN_KEY}_test.hdf"
 DATA_PRED_FN = f"rlcalc_{DATA_FN_KEY}_pred.hdf"
 
 TEST_FLAG = False
+
+FS_COLS = ["038开发支出", "009研发费用", "036五、现金及现金等价物净增加额", "001一、营业总收入", "010经营活动产生的现金流量净额", "001一、营业总收入",
+           "003二、营业总成本", "020流动资产合计", "015三、营业利润", "087所有者权益(或股东权益)合计", "039商誉", "050预收款项", "030固定资产及清理(合计)",
+           "027在建工程(合计)", "044资产总计", "008预付款项", "041递延所得税资产", "019四、利润总额", "扣除非经常性损益后的净利润", "063流动负债合计",
+           "022归属于母公司所有者的净利润", "053财务费用", "010资产减值损失", "042资产减值准备", "045长期待摊费用摊销", "044无形资产摊销",
+           "043固定资产折旧、油气资产折耗、生产性物资折旧"]
+DATA_FS_FN = "exp_fs_yearly.hdf"
+EXP_FS_YEARS = 3
+
+EXP_DK1D_SEQ_LEN = 20
+EXP_FS1Y_SEQ_LEN = 3
 
 #cmd line parmeters.
 def cmd_line():
@@ -192,11 +206,16 @@ def load_stocks_data(file_name):
         df = df.loc[df.index.get_level_values("code")!=code]
     return df
 
+def load_stock_fs_date(fn):
+    df = pd.read_hdf(fn, "fs")
+    df = df.loc[:, FS_COLS]
+    return df
+
 #create our dataset.
 class MyDataset(Data.Dataset):
     def __init__(self, data):
         self.data = data
-        self.labels = [ x[1].item() for x in data ]
+        # self.labels = [ x[1].item() for x in data ]
 
     def __getitem__(self, item):
         #print(len(self.data), item, "\r\n", self.data[item][0].numpy()[::34], self.data[item][1].numpy())
@@ -764,7 +783,7 @@ def process_stocks_norm_mmdataset(dataAll, batch_size, shuffle,data_index_set, t
         pickle.dump(last_seq_ts, pkl_file)
     return seq, last_seq_ts
 
-def process_stocks_norm_dataset(dataAll, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_", dataset_type="PklDataset", dump_file = True):
+def process_stocks_norm_dataset(dataAll, fsdata, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_", dataset_type="PklDataset", dump_file = True):
     global reproduct_args
     args=get_args()
 
@@ -781,7 +800,7 @@ def process_stocks_norm_dataset(dataAll, batch_size, shuffle,data_index_set, tes
             last_pkl = pickle.load(last_pkl_file)
         return seq_pkl, last_pkl
 
-    seq_len=get_args()["seq_len"]
+    seq_len=get_args()["seq_len"][EXP_LSTM_SEQ_IDX_DK1D]
     steps=args["multi_steps"]
     dataAll = dataAll.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
 
@@ -793,11 +812,17 @@ def process_stocks_norm_dataset(dataAll, batch_size, shuffle,data_index_set, tes
     seq = []
     last_seq_ts = []
 
-    mmdataset = globals()[dataset_type](seq_name=seq_pkl_name, size=len(dataAll.index), input_shape=(seq_len, len(dataAll.columns)), label_shape=(args["output_size"], ), info_shape=(LABEL_INFO_LEN, ))
+    mmdataset = globals()[dataset_type](seq_name=seq_pkl_name, size=len(dataAll.index), input_shape=[[(seq_len, len(dataAll.columns)), (EXP_FS_YEARS, len(FS_COLS))], 0],
+                                        label_shape=(args["output_size"], ), info_shape=(LABEL_INFO_LEN, ))
     mmdataset_idx = 0
+
+    fscode = fsdata.index.get_level_values("code").unique()
 
     for code in dataAll.index.get_level_values("code").unique():
         data = dataAll.loc[("szse", code)].sort_index()
+        if code not in fscode:
+            continue #fixme bank type stock not exist in fsdata
+        fsdf = fsdata.loc[("szse", code)].sort_index()
         # print("proc code", code)
         train_seqs = []
         train_labels = []
@@ -807,6 +832,9 @@ def process_stocks_norm_dataset(dataAll, batch_size, shuffle,data_index_set, tes
         missing_seq = []
         bigrise_seq = []
         infos = []
+        last_input_seq = None
+        last_label = None
+        last_date = None
 
         # idxvol_idx = list(data.columns).index("idxvol")
         # vod_idx    = list(data.columns).index("vol")
@@ -815,6 +843,10 @@ def process_stocks_norm_dataset(dataAll, batch_size, shuffle,data_index_set, tes
             if "vol" in data.columns[i]:
                 range_norm_list += [i]
         for date in data.index.get_level_values("date").unique().sort_values():
+            year_begin = pandas.Timestamp(year=date.year-get_args()["seq_len"][EXP_LSTM_SEQ_IDX_FS1Y], month=date.month, day=date.day)
+            fsdfseq = fsdf.loc[(fsdf.index.get_level_values("date")<=date)&(fsdf.index.get_level_values("date")>year_begin)]
+            if len(fsdfseq.index) < EXP_FS_YEARS:
+                continue
             train_seq = data.loc[date].to_numpy().flatten().tolist()
             # close_topn = data.loc[date, "close"].sort_values(ascending=False).iloc[BK_TOPN]
             # train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
@@ -870,15 +902,18 @@ def process_stocks_norm_dataset(dataAll, batch_size, shuffle,data_index_set, tes
                 if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) ==False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False \
                         and any(bigrise_seq[-RISE_WIN-steps:-steps]):
                     # seq.append((train_seq_ts, train_label_ts, code, date.value, infos[-steps]))
-                    mmdataset.map(mmdataset_idx, npa, train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1],
-                                                       np.array([float(code), float(date.value), float(infos[-steps][0])]))
+                    last_input_seq = [[npa, fsdfseq.values], None]
+                    last_label = train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]
+                    last_date = date
+                    mmdataset.map(mmdataset_idx, last_input_seq, last_label,
+                                                       np.array([float(code), float(last_date.value), float(infos[-steps][0])]))
                     mmdataset_idx += 1
                 else:
                     pass
                     #print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
-        if any(missing_seq[-seq_len:]) == False and any(bigrise_seq[-RISE_WIN:]):
-            train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
-            last_seq_ts += [(torch.FloatTensor(train_seqs[-seq_len:]), train_label_ts, code, (date + datetime.timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+        if last_input_seq is not None and any(bigrise_seq[-RISE_WIN:]):
+            # train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
+            last_seq_ts += [(tuple(last_input_seq[EXP_MODS_LSTM_IDX]), np.empty(0), last_label, code, last_date.value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
         else:
             pass
             #print("missing")
@@ -1329,6 +1364,8 @@ def nn_stocksdata_seq(batch_size, lstmtype):
         dateFirstIndex = dataset.reset_index().set_index(["date", "exchange", "code"]).sort_index().index
         # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
 
+        fsdataset = load_stock_fs_date(DATA_FS_FN)
+
         algs=get_args()
         #check number of data items in df, if it is too less , we can not train it.
         algs["train_end"]=0.515
@@ -1343,29 +1380,19 @@ def nn_stocksdata_seq(batch_size, lstmtype):
         print("train_end", train_date_end, "val_end", val_date_end)
 
     if NO_TRAIN == False:
-        if os.path.exists(DATA_TRAIN_FN) and False:
-            train = load_stocks_data(DATA_TRAIN_FN)
-        else:
-            print("missing", DATA_TRAIN_FN)
-            train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
-        if os.path.exists(DATA_VAL_FN) and False:
-            val = load_stocks_data(DATA_VAL_FN)
-        else:
-            print("missing", DATA_VAL_FN)
-            val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
+        train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
+        val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
+        # fs_train = fsdataset.loc[fsdataset.index.get_level_values("date")<=train_date_end]
+        # fs_val = fsdataset.loc[(fsdataset.index.get_level_values("date")>train_date_end) & (fsdataset.index.get_level_values("date")<=val_date_end)]
 
     if NO_TEST == False:
-        if os.path.exists(DATA_TEST_FN) and False:
-            test = load_stocks_data(DATA_TEST_FN)
-        else:
-            print("missing", DATA_TEST_FN)
-            args=get_args()
-            test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
-            if MAX_SEQ_LEN < args["seq_len"]:
-                print("overflow")
-                sys.exit()
-            test_dates = test.index.get_level_values("date").unique()[MAX_SEQ_LEN-args["seq_len"]]
-            test = test.loc[test.index.get_level_values("date")>test_dates]
+        args=get_args()
+        test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
+        if MAX_SEQ_LEN < args["seq_len"][EXP_LSTM_SEQ_IDX_DK1D]:
+            print("overflow")
+            sys.exit()
+        test_dates = test.index.get_level_values("date").unique()[MAX_SEQ_LEN-args["seq_len"][EXP_LSTM_SEQ_IDX_DK1D]]
+        test = test.loc[test.index.get_level_values("date")>test_dates]
 
     if os.path.exists(DATA_PRED_FN):
         pred = load_stocks_data(DATA_PRED_FN)
@@ -1387,8 +1414,8 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TRAIN == False:
         # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
-        Dtr, _ = process_stocks_norm_dataset(train, batch_size, True,data_index_set, stage="train_", dataset_type="MMDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)  #process_stocks_norm_mmdataset
-        Val, _ = process_stocks_norm_dataset(val,   batch_size, True,data_index_set, stage="val_", dataset_type="PklDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)
+        Dtr, _ = process_stocks_norm_dataset(train, fsdataset, batch_size, True,data_index_set, stage="train_", dataset_type="MMDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)  #process_stocks_norm_mmdataset
+        Val, _ = process_stocks_norm_dataset(val,   fsdataset, batch_size, True,data_index_set, stage="val_", dataset_type="PklDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)
         # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
     else:
@@ -1398,14 +1425,14 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TEST == False:
         # Dte, _ = process_stocks_norm_c2c1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, _ = process_stocks_norm_dataset(test,  1, False,data_index_set, stage="test_", dataset_type="PklDataset")
-        _, last_seq_ts = process_stocks_norm_dataset(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="PklDataset")
+        Dte, _ = process_stocks_norm_dataset(test,  fsdataset, 1, False,data_index_set, stage="test_", dataset_type="PklDataset")
+        _, last_seq_ts = process_stocks_norm_dataset(pred,  fsdataset, batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="PklDataset")
         # Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
     else:
         # Dte = None
         # Dte, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, last_seq_ts = process_stocks_norm_dataset(pred,  batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="PklDataset")
+        Dte, last_seq_ts = process_stocks_norm_dataset(pred,  fsdataset, batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="PklDataset")
         # Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
 
     return Dtr, Val, Dte, last_seq_ts, pred
@@ -1709,6 +1736,7 @@ def pred_stat(lastbest_pred_target, stage="training"):
 def train(args, Dtr, Val, paths, Dte, last_seq_ts):
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
+    merged_hidden_size, merged_num_mid_layers = args['merged_hidden_size'], args['merged_num_mid_layers']
     output_size = args['output_size']
     seq_len = args['seq_len']
     
@@ -1719,6 +1747,9 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         model = LSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
         # loss_function = LossLogMse().to(device)
+    if args["type"] == 'LSTMs':
+        model = LSTMs(  input_size, hidden_size, num_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
+        loss_function = nn.MSELoss().to(device)
     elif args["type"] == 'MLPX':
         model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
@@ -1762,6 +1793,7 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
 
     lastbest_pred_target = []
     currbest_pred_target = []
+    r2score = R2Score()
 
     print('training...')
     for epoch in tqdm(range(args['epochs'])):
@@ -1771,10 +1803,15 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         targets = []
         model_result = []
         model.eval()
-        for (seq, label, _, _, _) in Val:
-            seq = seq.to(device)
+        for (seqs, mlp_in, label, _, _, _) in Val:
+
+            # seq = seq.to(device)
             label = label.to(device)
-            y_pred = model(seq)
+            inputs = [[lstmseq.to(device) for lstmseq in seqs]]
+            if input_size[EXP_MODS_MLP_IDX] > 0:
+                inputs += [mlp_in]
+            y_pred = model(inputs)
+            # y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
             currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), label.detach().cpu().numpy().flatten())]
             model_result.extend( y_pred.detach().cpu().numpy() )
             targets.extend( label.detach().cpu().numpy() )
@@ -1800,7 +1837,7 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
             topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
             topnclose = np.take(targets, topnidx)
             print("\nAverage close is:", topnclose.mean(), np.mean(targets))
-        print('epoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, patience), flush=True)
+        print('epoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} R2 {:.4f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, r2score(torch.tensor(model_result), torch.tensor(targets)), patience), flush=True)
 
         #get the best model.
         if(val_loss_all[-1]<best_loss):
@@ -1830,10 +1867,14 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         train_loss = 0
         num_item=0
         model.train()
-        for (seq, label, _, _, _) in Dtr:
-            seq = seq.to(device)
+        for (seqs, mlp_in, label, _, _, _) in Dtr:
+            # seq = seq.to(device)
             label = label.to(device)
-            y_pred = model(seq)
+            inputs = [[lstmseq.to(device) for lstmseq in seqs]]
+            if input_size[EXP_MODS_MLP_IDX] > 0:
+                inputs += [mlp_in]
+            y_pred = model(inputs)
+            # y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
             loss = loss_function(y_pred, label)
             train_loss+=loss.item()*len(y_pred)
             num_item+=len(y_pred)
@@ -1902,6 +1943,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
+    merged_hidden_size, merged_num_mid_layers = args['merged_hidden_size'], args['merged_num_mid_layers']
     output_size = args['output_size']
     seq_len = args['seq_len']
 
@@ -1909,6 +1951,9 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         model = BiLSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     elif args['type'] == "LSTM":
         model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
+    if args["type"] == 'LSTMs':
+        model = LSTMs(  input_size, hidden_size, num_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
+        loss_function = nn.MSELoss().to(device)
     elif args["type"] == 'MLPX':
         model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
     elif args["type"] == 'RA':
@@ -1932,6 +1977,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         pred=np.empty(shape=(0,args["output_size"]))
         y=np.empty(shape=(0,args["output_size"]))
 
+    r2score = R2Score()
     if not NO_TEST:
         targets_dates = {}
         model_result_dates = {}
@@ -1940,7 +1986,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         model_result = []
         infos = {}
         currbest_pred_target = []
-        for (seq, target, code, date, info) in tqdm(Dte):
+        for (seqs, mlp_in, target, code, date, info) in tqdm(Dte):
             date = date.item()
             if date not in targets_dates:
                 model_result_dates[date] = []
@@ -1948,9 +1994,13 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                 code_dates[date] = []
                 infos[date] = []
             y=np.append(y,target.numpy(),axis=0)
-            seq = seq.to(device)
+            # seq = seq.to(device)
             with torch.no_grad():
-                y_pred = model(seq)
+                inputs = [[lstmseq.to(device) for lstmseq in seqs]]
+                if input_size[EXP_MODS_MLP_IDX] > 0:
+                    inputs += [mlp_in]
+                y_pred = model(inputs)
+                # y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
                 # model_result_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], y_pred.detach().cpu().numpy()) )
                 # targets_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
                 # code_dates[date].extend( code )
@@ -1970,7 +2020,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
             if len(model_result) == 100 and False:
                 plt.plot(np.array(model_result).T, np.array(targets).T)
                 plt.show()
-
+        print("r2socre", r2score(torch.tensor(model_result), torch.tensor(targets)))
         buy_threshold_calc = pred_stat(currbest_pred_target, stage="test")
 
         if buy_threshold != buy_threshold:
@@ -2074,11 +2124,15 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     targets = []
     model_result = []
     stocktypes = []
-    for (seq, target, code, date) in last_seq_ts:
+    for (seq, mlp_in, target, code, date) in last_seq_ts:
         # y=np.append(y,target.numpy(),axis=0)
-        seq = seq.to(device)
+        # seq = seq.to(device)
         with torch.no_grad():
-            y_pred = model(seq)
+            inputs = [[lstmseq.to(device) for lstmseq in seqs]]
+            if input_size[EXP_MODS_MLP_IDX] > 0:
+                inputs += [mlp_in]
+            y_pred = model(inputs)
+            # y_pred = model(seq)
             # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
             model_result.extend( y_pred.detach().cpu().numpy() )
             targets.extend( target.detach().cpu().numpy() )
@@ -2174,20 +2228,22 @@ if __name__ == '__main__' :
     #batch_size should be 5-8 for sinble parameters pridiction and 100 for multi-parameter prediction.
     #xxx_begin and xxx_end for data split, can be modified per yourslef.
     args={
-          "input_size":BK_SIZE*len(COLS), #number of input parameters used in predition. you can modify it in data index list.
-          "hidden_size":int(BK_SIZE*len(COLS)*2),#number of cells in one hidden layer.
-          "num_layers":2,  #number of hidden layers in predition module.
+          "input_size":[[BK_SIZE*len(COLS), len(FS_COLS)], 0], #number of input parameters used in predition. you can modify it in data index list.
+          "hidden_size":[[int(BK_SIZE*len(COLS)*2), 2*len(FS_COLS)], 0],#number of cells in one hidden layer.
+          "num_layers":[[2, 2], 0],  #number of hidden layers in predition module.
+          "merged_hidden_size": 8,
+          "merged_num_mid_layers": 2,
           "output_size":BK_SIZE, #number of parameter will be predicted.
           "lr":1e-3, #1e-5,
           "weight_decay":0.0, #0001,
           "bidirectional":False,
-          "type": "LSTM", # BiLSTM, LSTM, MultiLabelLSTM, MLPX
+          "type": "LSTMs", # BiLSTM, LSTM, MultiLabelLSTM, MLPX
           "optimizer":"adam",
           "step_size":500000000000,
           "gamma":0.5,
           "epochs":50000,
           "batch_size":64,#batch of data will be push in model. large batch in multi parameter prediction will be better.
-          "seq_len":20, #one contionus series input data will be used to predict the selected parameter.
+          "seq_len":[EXP_DK1D_SEQ_LEN, EXP_FS1Y_SEQ_LEN], #one contionus series input data will be used to predict the selected parameter.
           "multi_steps":2, #next x days's stock price can be predictions. maybe 1,2,3....
           "pred_type":"close",#open price / close price / high price / low price.
           "train_end":1.0,

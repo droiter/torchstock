@@ -1,5 +1,5 @@
 import torch
-from torch import device, nn
+from torch import nn
 import torch.utils.data as Data
 from torch.optim import lr_scheduler
 import math
@@ -62,6 +62,7 @@ class LSTMs(nn.Module):
         lstmList = []
         h0s = []
         c0s = []
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
         for i in range(len(self.input_sizes[EXP_MODS_LSTM_IDX])):
             h0 = torch.zeros(self.num_directions * self.num_layers[EXP_MODS_LSTM_IDX][i], 1, self.hidden_sizes[EXP_MODS_LSTM_IDX][i]).to(device)
             c0 = torch.zeros(self.num_directions * self.num_layers[EXP_MODS_LSTM_IDX][i], 1, self.hidden_sizes[EXP_MODS_LSTM_IDX][i]).to(device)
