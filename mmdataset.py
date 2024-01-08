@@ -81,9 +81,9 @@ class MMDataset(Dataset):
                 self.mmap_input_path[i], sample_type, (self.size, *self.input_shape[EXP_MODS_LSTM_IDX][i]), remove_existing=remove_existing
             )]
         if self.input_shape[EXP_MODS_MLP_IDX] > 0:
-            self.mmap_inputs += [self._init_mmap(
+            self.mmap_mlp_inputs = self._init_mmap(
                 self.mmap_mlp_input_path, sample_type, (self.size, self.input_shape[EXP_MODS_MLP_IDX]), remove_existing=remove_existing
-            )]
+            )
         self.mmap_labels = self._init_mmap(
             self.mmap_labels_path, sample_type, (self.size, *self.label_shape), remove_existing=remove_existing
         )

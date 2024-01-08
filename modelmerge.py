@@ -98,7 +98,7 @@ class LSTMs(nn.Module):
         # self.mlp.add_module(f"RO", nn.ReLU())
         self.mlp.add_module(f"LO", nn.Linear(merged_hidden_size, output_size))
 
-    def forward(self, lstm_input_seqs, mlp_input_seqs=[]):
+    def forward(self, lstm_input_seqs): #, mlp_input_seqs=[]
         batch_size, seq_len = lstm_input_seqs[EXP_MODS_LSTM_IDX][0].shape[0], lstm_input_seqs[EXP_MODS_LSTM_IDX][0].shape[1]
         # h_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
         # c_0 = torch.randn(self.num_directions * self.num_layers, self.batch_size, self.hidden_size).to(device)
@@ -113,7 +113,8 @@ class LSTMs(nn.Module):
             outputs += [output]
 
         if self.input_sizes[EXP_MODS_MLP_IDX] > 0:
-            mlpoutput += [self.imlp(lstm_input_seqs[EXP_MODS_MLP_IDX][0])]
+            mlpoutput += [self.imlp(lstm_input_seqs[EXP_MODS_MLP_IDX])]
+            # mlpoutput += [self.imlp(lstm_input_seqs[EXP_MODS_MLP_IDX][0])]
 
         x = torch.cat([output[:, -1, :] for output in outputs] + [output for output in mlpoutput], dim=1)
         pred = self.mlp(x)  # (5, 24, 1)
@@ -167,7 +168,8 @@ def nn_stocksdata_seq():
     for i in range(start, start+LSTM_TRAIN_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         inputs2 = [ [do_calc(i+args["seq_len"]+j)] for j in range(LSTM_SEC_MODEL_SEQ_LEN)]
-        inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
+        # inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
+        inputs3 = [ [i%(LSTM_TRAIN_LEN*0.5)/(LSTM_TRAIN_LEN*0.5)] ]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
         plot_data += target
         xs += [i]
@@ -187,7 +189,8 @@ def nn_stocksdata_seq():
     for i in range(start, start+LSTM_VAL_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         inputs2 = [ [do_calc(i+args["seq_len"]+j)] for j in range(LSTM_SEC_MODEL_SEQ_LEN)]
-        inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
+        # inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
+        inputs3 = [ [i%(LSTM_TRAIN_LEN*0.5)/(LSTM_TRAIN_LEN*0.5)] ]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
         plot_data += target
         xs += [i]
@@ -207,7 +210,8 @@ def nn_stocksdata_seq():
     for i in range(start, start+LSTM_DTE_LEN):
         inputs = [ [do_calc(i+j)] for j in range(args["seq_len"])]
         inputs2 = [ [do_calc(i+args["seq_len"]+j)] for j in range(LSTM_SEC_MODEL_SEQ_LEN)]
-        inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
+        # inputs3 = [ [do_calc(i+args["seq_len"]+LSTM_SEC_MODEL_SEQ_LEN+j) for j in range(LSTM_THD_MODEL_MLP_STEP, LSTM_THD_MODEL_MLP_STEP+1)]]
+        inputs3 = [ [i%(LSTM_TRAIN_LEN*0.5)/(LSTM_TRAIN_LEN*0.5)] ]
         target = [ [do_calc(i+args["seq_len"]+args["multi_steps"])]]
         plot_data += target
         xs += [i]

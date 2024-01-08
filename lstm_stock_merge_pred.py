@@ -88,6 +88,7 @@ DATA_VAL_FN = f"rlcalc_{DATA_FN_KEY}_val.hdf"
 DATA_TEST_FN = f"rlcalc_{DATA_FN_KEY}_test.hdf"
 DATA_PRED_FN = f"rlcalc_{DATA_FN_KEY}_pred.hdf"
 
+print(DATA_ALL_FN, DATA_TRAIN_FN, DATA_VAL_FN, DATA_TEST_FN, DATA_PRED_FN)
 TEST_FLAG = False
 
 FS_COLS = ["038开发支出", "009研发费用", "036五、现金及现金等价物净增加额", "001一、营业总收入", "010经营活动产生的现金流量净额", "001一、营业总收入",
@@ -191,11 +192,13 @@ def load_stocks_data(file_name):
     global COLS
     df = pd.read_hdf(file_name, "rlcalc")
     COLS = list(df.columns)
+    print(COLS)
     df = df.reset_index().set_index(["exchange", "code", "date"]).sort_index()
     # df = df.rename(columns={"hfq_open": "open", "hfq_high": "high", "hfq_low": "low", "hfq_close": "close"})
     df = df.loc[:, COLS]
-    print("fixme size date", 160)
-    df = df.loc[((df.index.get_level_values("date") > "2019-1-1")&(df.index.get_level_values("code") > "002800")), COLS]
+    df = df.loc[df.index.get_level_values("date") > "2012-5-1", COLS]
+    # print("fixme debug")
+    # df = df.loc[(df.index.get_level_values("date") > "2012-5-1")&(df.index.get_level_values("code")>"002900"), COLS]
     # print(df.loc[(df>1.0).any(axis=1)].index.get_level_values("code"))
     # print(df.loc[(df<-1.0).any(axis=1)].index.get_level_values("code"))
     for code in df.loc[(df>1.0).any(axis=1)].index.get_level_values("code").unique():
@@ -783,7 +786,7 @@ def process_stocks_norm_mmdataset(dataAll, batch_size, shuffle,data_index_set, t
         pickle.dump(last_seq_ts, pkl_file)
     return seq, last_seq_ts
 
-def process_stocks_norm_dataset(dataAll, fsdata, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_", dataset_type="PklDataset", dump_file = True):
+def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle,data_index_set, test_pred=False, stage="train_test_", dataset_type="PklDataset", dump_file = True):
     global reproduct_args
     args=get_args()
 
@@ -812,7 +815,8 @@ def process_stocks_norm_dataset(dataAll, fsdata, batch_size, shuffle,data_index_
     seq = []
     last_seq_ts = []
 
-    mmdataset = globals()[dataset_type](seq_name=seq_pkl_name, size=len(dataAll.index), input_shape=[[(seq_len, len(dataAll.columns)), (EXP_FS_YEARS, len(FS_COLS))], 0],
+    mmdataset = globals()[dataset_type](seq_name=seq_pkl_name, size=len(dataAll.index),
+                                        input_shape=[[(seq_len, len(dataAll.columns)), (EXP_FS_YEARS, len(FS_COLS))], args["input_size"][EXP_MODS_MLP_IDX]],
                                         label_shape=(args["output_size"], ), info_shape=(LABEL_INFO_LEN, ))
     mmdataset_idx = 0
 
@@ -823,6 +827,7 @@ def process_stocks_norm_dataset(dataAll, fsdata, batch_size, shuffle,data_index_
         if code not in fscode:
             continue #fixme bank type stock not exist in fsdata
         fsdf = fsdata.loc[("szse", code)].sort_index()
+        mlpdf = mlpdataset.loc[("szse", code)] #.sort_index()
         # print("proc code", code)
         train_seqs = []
         train_labels = []
@@ -843,7 +848,8 @@ def process_stocks_norm_dataset(dataAll, fsdata, batch_size, shuffle,data_index_
             if "vol" in data.columns[i]:
                 range_norm_list += [i]
         for date in data.index.get_level_values("date").unique().sort_values():
-            year_begin = pandas.Timestamp(year=date.year-get_args()["seq_len"][EXP_LSTM_SEQ_IDX_FS1Y], month=date.month, day=date.day)
+            year_begin = pandas.Timestamp(year=date.year-get_args()["seq_len"][EXP_LSTM_SEQ_IDX_FS1Y], month=date.month,
+                                          day=date.day if date.month!=2 else min(date.day, 28))
             fsdfseq = fsdf.loc[(fsdf.index.get_level_values("date")<=date)&(fsdf.index.get_level_values("date")>year_begin)]
             if len(fsdfseq.index) < EXP_FS_YEARS:
                 continue
@@ -902,7 +908,7 @@ def process_stocks_norm_dataset(dataAll, fsdata, batch_size, shuffle,data_index_
                 if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) ==False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False \
                         and any(bigrise_seq[-RISE_WIN-steps:-steps]):
                     # seq.append((train_seq_ts, train_label_ts, code, date.value, infos[-steps]))
-                    last_input_seq = [[npa, fsdfseq.values], None]
+                    last_input_seq = [[npa, fsdfseq.values], mlpdf.loc[date].values]
                     last_label = train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]
                     last_date = date
                     mmdataset.map(mmdataset_idx, last_input_seq, last_label,
@@ -913,7 +919,8 @@ def process_stocks_norm_dataset(dataAll, fsdata, batch_size, shuffle,data_index_
                     #print("missing", sum(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]))
         if last_input_seq is not None and any(bigrise_seq[-RISE_WIN:]):
             # train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
-            last_seq_ts += [(tuple(last_input_seq[EXP_MODS_LSTM_IDX]), np.empty(0), last_label, code, last_date.value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+            # np.empty(0) if no mlp input
+            last_seq_ts += [(tuple(last_input_seq[EXP_MODS_LSTM_IDX]), mlpdf.loc[date].values, last_label, code, last_date.value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
         else:
             pass
             #print("missing")
@@ -1365,6 +1372,7 @@ def nn_stocksdata_seq(batch_size, lstmtype):
         # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
 
         fsdataset = load_stock_fs_date(DATA_FS_FN)
+        mlpdataset = pandas.read_hdf("exp_mv.hdf", "mv")
 
         algs=get_args()
         #check number of data items in df, if it is too less , we can not train it.
@@ -1414,8 +1422,8 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TRAIN == False:
         # Dtr, _ = process_stocks_norm_c2c1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_norm_c2c1(val,   batch_size, True,data_index_set)
-        Dtr, _ = process_stocks_norm_dataset(train, fsdataset, batch_size, True,data_index_set, stage="train_", dataset_type="MMDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)  #process_stocks_norm_mmdataset
-        Val, _ = process_stocks_norm_dataset(val,   fsdataset, batch_size, True,data_index_set, stage="val_", dataset_type="PklDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)
+        Dtr, _ = process_stocks_norm_dataset(train, fsdataset, mlpdataset, batch_size, True,data_index_set, stage="train_", dataset_type="MMDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)  #process_stocks_norm_mmdataset
+        Val, _ = process_stocks_norm_dataset(val,   fsdataset, mlpdataset, batch_size, True,data_index_set, stage="val_", dataset_type="MMDataset", dump_file=DUMP_DATASET_TRAIN_VAL_PKL)
         # Dtr, _ = process_stocks_O2toO1(train, batch_size, True,data_index_set)
         # Val, _ = process_stocks_O2toO1(val,   batch_size, True,data_index_set)
     else:
@@ -1425,14 +1433,14 @@ def nn_stocksdata_seq(batch_size, lstmtype):
     if NO_TEST == False:
         # Dte, _ = process_stocks_norm_c2c1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, _ = process_stocks_norm_dataset(test,  fsdataset, 1, False,data_index_set, stage="test_", dataset_type="PklDataset")
-        _, last_seq_ts = process_stocks_norm_dataset(pred,  fsdataset, batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="PklDataset")
+        Dte, _ = process_stocks_norm_dataset(test,  fsdataset, mlpdataset, 1, False,data_index_set, stage="test_", dataset_type="MMDataset")
+        _, last_seq_ts = process_stocks_norm_dataset(pred,  fsdataset, mlpdataset, batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="MMDataset")
         # Dte, _ = process_stocks_O2toO1(test,  1, False,data_index_set)
         # _, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
     else:
         # Dte = None
         # Dte, last_seq_ts = process_stocks_norm_c2c1(pred,  batch_size, False,data_index_set, test_pred=True)
-        Dte, last_seq_ts = process_stocks_norm_dataset(pred,  fsdataset, batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="PklDataset")
+        Dte, last_seq_ts = process_stocks_norm_dataset(pred,  fsdataset, mlpdataset, batch_size, False,data_index_set, test_pred=True, stage="pred_", dataset_type="MMDataset")
         # Dte, last_seq_ts = process_stocks_O2toO1(pred,  batch_size, False,data_index_set, test_pred=True)
 
     return Dtr, Val, Dte, last_seq_ts, pred
@@ -1837,7 +1845,7 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
             topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
             topnclose = np.take(targets, topnidx)
             print("\nAverage close is:", topnclose.mean(), np.mean(targets))
-        print('epoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} R2 {:.4f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, r2score(torch.tensor(model_result), torch.tensor(targets)), patience), flush=True)
+        print('epoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} R2 {:.4f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, r2score(torch.tensor(np.array(model_result)), torch.tensor(np.array(targets))), patience), flush=True)
 
         #get the best model.
         if(val_loss_all[-1]<best_loss):
@@ -2228,10 +2236,10 @@ if __name__ == '__main__' :
     #batch_size should be 5-8 for sinble parameters pridiction and 100 for multi-parameter prediction.
     #xxx_begin and xxx_end for data split, can be modified per yourslef.
     args={
-          "input_size":[[BK_SIZE*len(COLS), len(FS_COLS)], 0], #number of input parameters used in predition. you can modify it in data index list.
-          "hidden_size":[[int(BK_SIZE*len(COLS)*2), 2*len(FS_COLS)], 0],#number of cells in one hidden layer.
-          "num_layers":[[2, 2], 0],  #number of hidden layers in predition module.
-          "merged_hidden_size": 8,
+          "input_size":[[BK_SIZE*len(COLS), len(FS_COLS)], 2], #number of input parameters used in predition. you can modify it in data index list.
+          "hidden_size":[[int(BK_SIZE*len(COLS)*2), 2*len(FS_COLS)], 4],#number of cells in one hidden layer.
+          "num_layers":[[2, 2], 2],  #number of hidden layers in predition module.
+          "merged_hidden_size": 2*(len(COLS)+len(FS_COLS)),
           "merged_num_mid_layers": 2,
           "output_size":BK_SIZE, #number of parameter will be predicted.
           "lr":1e-3, #1e-5,
