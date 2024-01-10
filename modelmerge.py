@@ -10,6 +10,7 @@ import copy
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torchmetrics.regression import R2Score
+from nn_macro import *
 
 NO_TRAIN = False
 NO_TEST = False
@@ -73,7 +74,7 @@ class LSTMs(nn.Module):
 
             lstmList += [nn.LSTM(input_size = self.input_sizes[EXP_MODS_LSTM_IDX][i],
                                  hidden_size = self.hidden_sizes[EXP_MODS_LSTM_IDX][i],
-                                 num_layers = self.num_layers[EXP_MODS_LSTM_IDX][i], batch_first=True, dropout=0.5)]
+                                 num_layers = self.num_layers[EXP_MODS_LSTM_IDX][i], batch_first=True, dropout=EXP_NN_DROPOUT)]
 
         self.lstms = nn.ModuleList(lstmList)
         self.h0s = nn.ParameterList(h0s)
@@ -81,18 +82,22 @@ class LSTMs(nn.Module):
 
         if input_sizes[EXP_MODS_MLP_IDX] > 0:
             self.imlp = nn.Sequential()
+            self.imlp.add_module("iDI", nn.Dropout(EXP_NN_DROPOUT))
             self.imlp.add_module("iLI", nn.Linear(self.input_sizes[EXP_MODS_MLP_IDX], self.hidden_sizes[EXP_MODS_MLP_IDX]))
-            self.imlp.add_module("RI", nn.ReLU())
+            self.imlp.add_module("iRI", nn.ReLU())
             for i in range(merged_num_mid_layers):
+                self.imlp.add_module(f"iD{i}", nn.Dropout(EXP_NN_DROPOUT))
                 self.imlp.add_module(f"iL{i}", nn.Linear(self.hidden_sizes[EXP_MODS_MLP_IDX], self.hidden_sizes[EXP_MODS_MLP_IDX]))
                 self.imlp.add_module(f"iR{i}", nn.ReLU())
             # self.mlp.add_module(f"RO", nn.ReLU())
             # self.mlp.add_module(f"iLO", nn.Linear(merged_hidden_size, output_size))
 
         self.mlp = nn.Sequential()
+        self.mlp.add_module("DI", nn.Dropout(EXP_NN_DROPOUT))
         self.mlp.add_module("LI", nn.Linear(sum(self.hidden_sizes[EXP_MODS_LSTM_IDX])+self.hidden_sizes[EXP_MODS_MLP_IDX], merged_hidden_size))
         self.mlp.add_module("RI", nn.ReLU())
         for i in range(merged_num_mid_layers):
+            self.mlp.add_module(f"D{i}", nn.Dropout(EXP_NN_DROPOUT))
             self.mlp.add_module(f"L{i}", nn.Linear(merged_hidden_size, merged_hidden_size))
             self.mlp.add_module(f"R{i}", nn.ReLU())
         # self.mlp.add_module(f"RO", nn.ReLU())
@@ -138,7 +143,7 @@ class LSTM(nn.Module):
         self.h0 = nn.Parameter(h0, requires_grad=True)  # Parameter() to update weights
         self.c0 = nn.Parameter(c0, requires_grad=True)
 
-        self.lstm = nn.LSTM(input_size = self.input_size, hidden_size = self.hidden_size, num_layers = self.num_layers, batch_first=True, dropout=0.5)
+        self.lstm = nn.LSTM(input_size = self.input_size, hidden_size = self.hidden_size, num_layers = self.num_layers, batch_first=True, dropout=EXP_NN_DROPOUT)
         self.linear = nn.Linear(self.hidden_size, self.output_size)
 
     def forward(self, input_seq):

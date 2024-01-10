@@ -45,7 +45,7 @@ BK_SIZE = 1 #len(BKS)
 BK_TOPN = 10
 # COLS = ["open", "close", "high", "low", "vol"] #, 'buy_sm_vol', 'sell_sm_vol',  'buy_md_vol', 'sell_md_vol', 'buy_lg_vol', 'sell_lg_vol', 'buy_elg_vol', 'sell_elg_vol'] #
 # COLS = ["open", "close", "high", "low", "vol", "idxopen", "idxhigh", "idxlow", "idxclose", "idxvol"] #, 'buy_sm_vol', 'sell_sm_vol',  'buy_md_vol', 'sell_md_vol', 'buy_lg_vol', 'sell_lg_vol', 'buy_elg_vol', 'sell_elg_vol'] #
-TCH_EARLYSTOP_PATIENCE = 1 #20
+TCH_EARLYSTOP_PATIENCE = 6
 # ONLY_PREDICT = True
 NO_TRAIN = False
 NO_TEST = False
@@ -63,14 +63,14 @@ NP_TOPN = 10
 BIG_RISE = -math.inf #0.6
 RISE_WIN = 5
 LSTM_ADJUST_START = "O"  #"O" "N"
-LSTM_ADJUST_END = "N"  #"O" "N"
+LSTM_ADJUST_END = "O"  #"O" "N"
 
 MODULE_LOAD_BEST = NO_TRAIN
 MODULE_CURRENT_SAVED = None
 MODULE_SAVED_PING = 0
 MODULE_SAVED_PONG = 1
 
-DATA_SETS = ["zxbintra", "zxbzzintra"]
+DATA_SETS = ["zxbintra", "zxbzzintra", "szzsintra", "jqlbintra", "jqxdintra"]
 # DATA_FN_KEY = "zxbintra"
 # DATA_FN_KEY = "zxbintra_zxbzzintra"
 DATA_FN_KEY = "_".join(DATA_SETS)
@@ -99,7 +99,7 @@ FS_COLS = ["038开发支出", "009研发费用", "036五、现金及现金等价
 DATA_FS_FN = "exp_fs_yearly.hdf"
 EXP_FS_YEARS = 3
 
-EXP_DK1D_SEQ_LEN = 20
+EXP_DK1D_SEQ_LEN = 7 #96
 EXP_FS1Y_SEQ_LEN = 3
 
 #cmd line parmeters.
@@ -895,7 +895,7 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
 
             dataLen += 1
             if dataLen >= predstep:
-                npa = np.array(train_seqs[dataLen - predstep:dataLen - predstep+seq_len])
+                npa = np.array(train_seqs[dataLen - predstep:dataLen - predstep+seq_len], dtype=np.float32)
                 if RANGE_NORM == True:
                     for cidx in range_norm_list:
                         npa[:, cidx] = (2*npa[:, cidx] - np.max(npa[:, cidx]) - np.min(npa[:, cidx]))/(np.max(npa[:, cidx]) - np.min(npa[:, cidx]))
@@ -909,10 +909,10 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
                         and any(bigrise_seq[-RISE_WIN-steps:-steps]):
                     # seq.append((train_seq_ts, train_label_ts, code, date.value, infos[-steps]))
                     last_input_seq = [[npa, fsdfseq.values], mlpdf.loc[date].values]
-                    last_label = train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]
+                    last_label = train_adjs[-steps] * np.array(train_labels, dtype=np.float32)[-steps:].prod(axis=0)*train_adjs_end[-1]
                     last_date = date
                     mmdataset.map(mmdataset_idx, last_input_seq, last_label,
-                                                       np.array([float(code), float(last_date.value), float(infos[-steps][0])]))
+                                                       np.array([float(code), float(last_date.value), float(infos[-steps][0])], dtype=np.float32))
                     mmdataset_idx += 1
                 else:
                     pass
@@ -1108,7 +1108,7 @@ def nn_stocksdata_seq_split_by_code_n_date(batch_size, lstmtype):
         all_code_len = len(dateFirstIndex)
         train_date_end = dateFirstIndex[int(all_code_len*algs["train_end"])][0]
         val_date_end = dateFirstIndex[int(all_code_len*algs["val_end"])][0]
-        print("train_end", train_date_end, "val_end", val_date_end)
+        print("train_end", train_date_end, "val_end", val_date_end, "test_end", dateFirstIndex.get_level_values("date").max())
 
     if NO_TRAIN == False:
         if os.path.exists(DATA_TRAIN_FN) and False:
@@ -1135,6 +1135,7 @@ def nn_stocksdata_seq_split_by_code_n_date(batch_size, lstmtype):
 
     if os.path.exists(DATA_PRED_FN):
         pred = load_stocks_data(DATA_PRED_FN)
+        print("pred_begin", pred.index.get_level_values("date").min(), "pred_end", pred.index.get_level_values("date").max())
     else:
         pred = None
 
@@ -1365,27 +1366,27 @@ def nn_stocksdata_seq_random_split(batch_size, lstmtype):
 def nn_stocksdata_seq(batch_size, lstmtype):
     print('data processing...')
 
+    fsdataset = load_stock_fs_date(DATA_FS_FN).astype('float32')
+    mlpdataset = pandas.read_hdf("exp_mv.hdf", "mv").astype('float32')
+
     if NO_TRAIN == False or NO_TEST == False:
         data_file_name = DATA_ALL_FN
         dataset = load_stocks_data(data_file_name).astype('float32')
         dateFirstIndex = dataset.reset_index().set_index(["date", "exchange", "code"]).sort_index().index
         # dataset = dataset.loc[(slice(None), slice(None), BKS), COLS].sort_index()
 
-        fsdataset = load_stock_fs_date(DATA_FS_FN)
-        mlpdataset = pandas.read_hdf("exp_mv.hdf", "mv")
-
         algs=get_args()
         #check number of data items in df, if it is too less , we can not train it.
-        algs["train_end"]=0.515
-        algs["val_begin"]=0.515
-        algs["val_end"]=0.725
-        algs["test_begin"]=0.725
+        algs["train_end"]=0.6
+        algs["val_begin"]=0.6
+        algs["val_end"]=0.8
+        algs["test_begin"]=0.8
         print("fixme algs")
 
         all_code_len = len(dateFirstIndex)
         train_date_end = dateFirstIndex[int(all_code_len*algs["train_end"])][0]
         val_date_end = dateFirstIndex[int(all_code_len*algs["val_end"])][0]
-        print("train_end", train_date_end, "val_end", val_date_end)
+        print("train_end", train_date_end, "val_end", val_date_end, "test_end", dateFirstIndex.get_level_values("date").max())
 
     if NO_TRAIN == False:
         train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
@@ -1403,7 +1404,8 @@ def nn_stocksdata_seq(batch_size, lstmtype):
         test = test.loc[test.index.get_level_values("date")>test_dates]
 
     if os.path.exists(DATA_PRED_FN):
-        pred = load_stocks_data(DATA_PRED_FN)
+        pred = load_stocks_data(DATA_PRED_FN).astype('float32')
+        print("pred_begin", pred.index.get_level_values("date").min(), "pred_end", pred.index.get_level_values("date").max())
     else:
         pred = None
 
@@ -1727,7 +1729,8 @@ def pred_stat(lastbest_pred_target, stage="training"):
     dfStat = pandas.DataFrame(vStat)
     print(dfStat)
 
-    opDf = dfStat.loc[(dfStat.index>=(len(dfStat.index)/2))&(dfStat.ava>1.006)&(dfStat.winPrec>0.55)]
+    # opDf = dfStat.loc[(dfStat.index>=(len(dfStat.index)/2))&(dfStat.ava>1.006)&(dfStat.winPrec>0.55)]
+    opDf = dfStat.loc[(dfStat.winPrec>0.6)]
     opMin = opDf.vMin.min()
     if os.path.exists("torch_stock.cfg"):
         with open('torch_stock.cfg') as cfg_file:
@@ -1755,7 +1758,7 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         model = LSTM(  input_size, hidden_size, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
         # loss_function = LossLogMse().to(device)
-    if args["type"] == 'LSTMs':
+    elif args["type"] == 'LSTMs':
         model = LSTMs(  input_size, hidden_size, num_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
     elif args["type"] == 'MLPX':
@@ -1986,6 +1989,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         y=np.empty(shape=(0,args["output_size"]))
 
     r2score = R2Score()
+    currbest_pred_target = []
     if not NO_TEST:
         targets_dates = {}
         model_result_dates = {}
@@ -1993,7 +1997,6 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         targets = []
         model_result = []
         infos = {}
-        currbest_pred_target = []
         for (seqs, mlp_in, target, code, date, info) in tqdm(Dte):
             date = date.item()
             if date not in targets_dates:
@@ -2028,7 +2031,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
             if len(model_result) == 100 and False:
                 plt.plot(np.array(model_result).T, np.array(targets).T)
                 plt.show()
-        print("r2socre", r2score(torch.tensor(model_result), torch.tensor(targets)))
+        print("r2socre", r2score(torch.tensor(np.array(model_result)), torch.tensor(np.array(targets))))
         buy_threshold_calc = pred_stat(currbest_pred_target, stage="test")
 
         if buy_threshold != buy_threshold:
@@ -2097,14 +2100,22 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                     profit_all1 *= target_means[-1]
                     profit_topn1 *= target_topn_means[-1]
 
-                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_info, profit_threshold,
-                      # profit_all1, profit_topn1,
-                      np.mean(target_means), np.mean(target_topn_means), np.mean(target_info_means),
-                      np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]), profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
+                # print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_info, profit_threshold,
+                #       # profit_all1, profit_topn1,
+                #       np.mean(target_means), np.mean(target_topn_means), np.mean(target_info_means),
+                #       np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]), profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
+                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_threshold,
+                      np.mean(target_means), np.mean(target_topn_means), np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]),
+                      profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
                 topncode = np.take(code_dates[date], topnidx)
                 # topnpred = np.take(model_result_dates[date], topnidx)
-                topnAll = np.concatenate((topncode, topnclose, topnpred), axis=1)
-                # print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}\r\n{topnclose}" )
+                topncode = topncode.astype(float).astype(int).astype(str)
+                v = np.vectorize(lambda a: a.zfill(6))
+                topncode = v(topncode)
+                np.set_printoptions(linewidth=120, formatter={'float_kind': lambda x: '{:06.4f}'.format(x)})
+                # topnAll = np.concatenate((topncode, topnclose, topnpred), axis=1)
+                topnAll = np.concatenate((topncode.reshape(1, -1), topnclose.reshape(1, -1).round(4), topnpred.reshape(1, -1).round(4)), axis=0)
+                print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}" ) #\r\n{topnclose}
                 idx += 1
 
         print(datetime.datetime.fromtimestamp(sortedDate[0]/1e9), "--->", datetime.datetime.fromtimestamp(sortedDate[-1]/1e9))
@@ -2121,7 +2132,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     filedfList = {}
 
     for file in fileDict:
-        filedf = pandas.read_excel(fileDict[file], dtype={"股票代码":str}).set_index("股票代码")
+        filedf = pandas.read_excel(fileDict[file], dtype={"code":str}).set_index("code")
         filedf["idx"] = 0
         for idx in range(len(filedf.index)):
             filedf.loc[filedf.index[idx], "idx"] = idx
@@ -2132,9 +2143,16 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     targets = []
     model_result = []
     stocktypes = []
-    for (seq, mlp_in, target, code, date) in last_seq_ts:
+    cached_date = np.nan
+    dateList = []
+    for (seqs, mlp_in, target, code, date) in last_seq_ts:
+        dateList += [date.item()]
+    last_day = max(dateList)
+    for (seqs, mlp_in, target, code, date) in last_seq_ts:
         # y=np.append(y,target.numpy(),axis=0)
         # seq = seq.to(device)
+        if date.item() < last_day:
+            continue
         with torch.no_grad():
             inputs = [[lstmseq.to(device) for lstmseq in seqs]]
             if input_size[EXP_MODS_MLP_IDX] > 0:
@@ -2153,6 +2171,9 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                     break
             if not bfound:
                 stocktypes += ["no"]
+            if cached_date != date.item():
+                print("pred on date", pandas.to_datetime(date.item()))
+                cached_date = date.item()
 
     # topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
     # topnclose = np.take(codes, topnidx)
@@ -2218,7 +2239,8 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         plt.legend()
         plt.show()
 
-    pred_stat(currbest_pred_target, stage="test")
+    if len(currbest_pred_target):
+        pred_stat(currbest_pred_target, stage="test")
 
 def test_signal(_signo, _stack_frame):
     global TEST_FLAG
@@ -2237,12 +2259,12 @@ if __name__ == '__main__' :
     #xxx_begin and xxx_end for data split, can be modified per yourslef.
     args={
           "input_size":[[BK_SIZE*len(COLS), len(FS_COLS)], 2], #number of input parameters used in predition. you can modify it in data index list.
-          "hidden_size":[[int(BK_SIZE*len(COLS)*2), 2*len(FS_COLS)], 4],#number of cells in one hidden layer.
-          "num_layers":[[2, 2], 2],  #number of hidden layers in predition module.
-          "merged_hidden_size": 2*(len(COLS)+len(FS_COLS)),
+          "hidden_size":[[1, 2*len(FS_COLS)], 4], #[[int(BK_SIZE*len(COLS)*2), 2*len(FS_COLS)], 4], ##number of cells in one hidden layer.
+          "num_layers":[[1, 2], 2], #[[2, 2], 2],  #number of hidden layers in predition module.
+          "merged_hidden_size": 2*(1+len(FS_COLS)), #2*(len(COLS)+len(FS_COLS)),
           "merged_num_mid_layers": 2,
           "output_size":BK_SIZE, #number of parameter will be predicted.
-          "lr":1e-3, #1e-5,
+          "lr":3e-4, #1e-5,
           "weight_decay":0.0, #0001,
           "bidirectional":False,
           "type": "LSTMs", # BiLSTM, LSTM, MultiLabelLSTM, MLPX
@@ -2252,7 +2274,7 @@ if __name__ == '__main__' :
           "epochs":50000,
           "batch_size":64,#batch of data will be push in model. large batch in multi parameter prediction will be better.
           "seq_len":[EXP_DK1D_SEQ_LEN, EXP_FS1Y_SEQ_LEN], #one contionus series input data will be used to predict the selected parameter.
-          "multi_steps":2, #next x days's stock price can be predictions. maybe 1,2,3....
+          "multi_steps":5, #next x days's stock price can be predictions. maybe 1,2,3....
           "pred_type":"close",#open price / close price / high price / low price.
           "train_end":1.0,
           "val_begin":0.6,
@@ -2303,11 +2325,17 @@ if __name__ == '__main__' :
     # Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq_split_by_code_n_date(args['batch_size'], args['type'])
     Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq(args['batch_size'], args['type'])
 
-    #train it.
-    if NO_TRAIN == False:
-        buy_threshold = train(args, Dtr, Val, path_file, Dte, last_seq_ts)
-    else:
-        buy_threshold = math.nan
-    #teest it.
-    test(args, Dte, path_file, data_pred_index, last_seq_ts, testdf, buy_threshold)
+    lrs = [3e-4, 1e-4, 3e-5, 1e-5, 3e-6, 1e-6]
+    # lrs = [3e-7, 1e-7]
+
+    for lr in lrs:
+        args["lr"] = lr
+        print("lr is", lr)
+        #train it.
+        if NO_TRAIN == False:
+            buy_threshold = train(args, Dtr, Val, path_file, Dte, last_seq_ts)
+        else:
+            buy_threshold = math.nan
+        #teest it.
+        test(args, Dte, path_file, data_pred_index, last_seq_ts, testdf, buy_threshold)
     
