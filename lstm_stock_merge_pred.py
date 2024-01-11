@@ -1730,7 +1730,7 @@ def pred_stat(lastbest_pred_target, stage="training"):
     print(dfStat)
 
     # opDf = dfStat.loc[(dfStat.index>=(len(dfStat.index)/2))&(dfStat.ava>1.006)&(dfStat.winPrec>0.55)]
-    opDf = dfStat.loc[(dfStat.winPrec>0.6)]
+    opDf = dfStat.loc[(dfStat.winPrec2e>0.6)]
     opMin = opDf.vMin.min()
     if os.path.exists("torch_stock.cfg"):
         with open('torch_stock.cfg') as cfg_file:
@@ -2115,7 +2115,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                 np.set_printoptions(linewidth=120, formatter={'float_kind': lambda x: '{:06.4f}'.format(x)})
                 # topnAll = np.concatenate((topncode, topnclose, topnpred), axis=1)
                 topnAll = np.concatenate((topncode.reshape(1, -1), topnclose.reshape(1, -1).round(4), topnpred.reshape(1, -1).round(4)), axis=0)
-                print(f"\ntopn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}" ) #\r\n{topnclose}
+                print(f"topn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}" ) #\r\n{topnclose}
                 idx += 1
 
         print(datetime.datetime.fromtimestamp(sortedDate[0]/1e9), "--->", datetime.datetime.fromtimestamp(sortedDate[-1]/1e9))
@@ -2145,6 +2145,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     stocktypes = []
     cached_date = np.nan
     dateList = []
+    skipCodeList = []
     for (seqs, mlp_in, target, code, date) in last_seq_ts:
         dateList += [date.item()]
     last_day = max(dateList)
@@ -2152,6 +2153,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         # y=np.append(y,target.numpy(),axis=0)
         # seq = seq.to(device)
         if date.item() < last_day:
+            skipCodeList += [code]
             continue
         with torch.no_grad():
             inputs = [[lstmseq.to(device) for lstmseq in seqs]]
@@ -2181,7 +2183,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     # print(topnclose)
     topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
     topnclose = np.take(codes, topnidx)
-    print("predicting code", pandas.to_datetime(date.item()))
+    print("predicting code", pandas.to_datetime(date.item()), "skip", skipCodeList)
     for c in topnclose:
         print(c)
     # print(f"\nAverage {NP_TOPN} close is:", topnclose.mean())
@@ -2338,4 +2340,7 @@ if __name__ == '__main__' :
             buy_threshold = math.nan
         #teest it.
         test(args, Dte, path_file, data_pred_index, last_seq_ts, testdf, buy_threshold)
+
+        if NO_TRAIN == True:
+            break
     
