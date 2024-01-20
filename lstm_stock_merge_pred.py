@@ -37,6 +37,7 @@ from tsai.models.RNNAttention import LSTMAttention
 from torchmetrics.regression import R2Score
 from modelmerge import LSTMs
 from nn_macro import *
+from torchviz import make_dot
 
 BKS = ['000001', '880301', '880305', '880310', '880318', '880324', '880330', '880335', '880344', '880350', '880351', '880355', '880360', '880367', '880372', '880380', '880387', '880390', '880398', '880399', '880400', '880406', '880414', '880418', '880421', '880422', '880423', '880424', '880430', '880431', '880432', '880437', '880440', '880446', '880447', '880448', '880452', '880453', '880454', '880455', '880456', '880459', '880464', '880465', '880471', '880472', '880473', '880474', '880476', '880482', '880489', '880490', '880491', '880492', '880493', '880494', '880497', '399001']
 
@@ -96,10 +97,11 @@ FS_COLS = ["038开发支出", "009研发费用", "036五、现金及现金等价
            "027在建工程(合计)", "044资产总计", "008预付款项", "041递延所得税资产", "019四、利润总额", "扣除非经常性损益后的净利润", "063流动负债合计",
            "022归属于母公司所有者的净利润", "053财务费用", "010资产减值损失", "042资产减值准备", "045长期待摊费用摊销", "044无形资产摊销",
            "043固定资产折旧、油气资产折耗、生产性物资折旧"]
+# FS_COLS = ["038开发支出", "009研发费用", "036五、现金及现金等价物净增加额", "050预收款项", "041递延所得税资产",]
 DATA_FS_FN = "exp_fs_yearly.hdf"
 EXP_FS_YEARS = 3
 
-EXP_DK1D_SEQ_LEN = 7 #96
+EXP_DK1D_SEQ_LEN = 96
 EXP_FS1Y_SEQ_LEN = 3
 
 #cmd line parmeters.
@@ -1523,6 +1525,14 @@ def nn_data_seq(batch_size):
 
     return Dtr, Val, Dte
 
+class LossCubedMse(nn.Module):
+    def __init__(self):
+        super(LossCubedMse, self).__init__()
+
+    def forward(self, inputs, targets):
+        loss = (torch.pow(inputs, 3) - torch.pow(targets, 3))**2
+        return loss.mean()
+
 class LossLogMse(nn.Module):
     def __init__(self):
         super(LossLogMse, self).__init__()
@@ -1696,7 +1706,19 @@ def pred_stat(lastbest_pred_target, stage="training"):
     dfAll = pandas.concat(dfList)
     print(len(dfAll.index))
     dfAll = dfAll.sort_values("pred")
-    binsize = 20
+    pred_stat_bin_by_pred(dfAll, stage=stage, binsize=20)
+    return pred_stat_bin_by_pred_nth(dfAll, stage=stage, binsize=20)
+
+def pred_stat_bin_by_pred(dfAll, stage="training", binsize=20):
+    json_cfg = { "threshold": -1 }
+    # dfList = []
+    # for s in lastbest_pred_target:
+    #     df = pandas.DataFrame({"pred":s[0], "target": s[1]})
+    #     dfList += [df]
+    # dfAll = pandas.concat(dfList)
+    # print(len(dfAll.index))
+    # dfAll = dfAll.sort_values("pred")
+    # binsize = 20
     dfPredMin = dfAll.pred.min()
     dfPredMax = dfAll.pred.max()
 
@@ -1743,10 +1765,79 @@ def pred_stat(lastbest_pred_target, stage="training"):
     print(stage, "threshold is", opMin)
     return opMin
 
+def pred_stat_bin_by_pred_nth(dfAll, stage="training", binsize=20, nth=99):
+    json_cfg = { "threshold": -1 }
+    # dfList = []
+    # for s in lastbest_pred_target:
+    #     df = pandas.DataFrame({"pred":s[0], "target": s[1]})
+    #     dfList += [df]
+    # dfAll = pandas.concat(dfList)
+    # print(len(dfAll.index))
+    # dfAll = dfAll.sort_values("pred")
+    # binsize = 20
+    # dfPredMin = dfAll.pred.min()
+    # dfPredMax = dfAll.pred.max()
+    nineth_num = max(int(len(dfAll.index)*(100.0-nth)/100.0), 1)
+    dfPredMin = dfAll.iloc[nineth_num]["pred"]
+    dfPredMax = dfAll.iloc[-nineth_num]["pred"]
+    rangeList = [ math.nan for i in range(binsize+1)]
+    stepSize = (dfPredMax - dfPredMin)/binsize
+    rangeList[0] = (dfAll.pred.min(), dfPredMin+stepSize)
+    rangeList[-1] = (dfPredMax-stepSize, dfAll.pred.max())
+
+    for i in range(1, binsize):
+        rangeList[i] = (dfPredMin+i*stepSize, dfPredMin+i*stepSize+stepSize)
+
+    # print("rangeList", rangeList)
+
+    vStat = { "vMin":[], "vMax": [], "ava": [], "winPrec": [], "perc": [], "ava2e": [], "winPrec2e": [], "perc2e": [], "smpNo": []}
+
+    for i in range(binsize+1):
+        # vMin = dfPredMin+i*stepSize
+        # vMax = dfPredMin+i*stepSize+stepSize
+        vMin, vMax = rangeList[i]
+        df = dfAll.loc[(dfAll.pred>=vMin)&(dfAll.pred<vMax)]
+        df2e = dfAll.loc[(dfAll.pred>=vMin)]
+        vStat["vMin"] += [vMin]
+        vStat["vMax"] += [vMax]
+        vStat["ava"] += [df.target.mean()]
+        if len(df.index) > 0:
+            vStat["winPrec"] += [sum(df.target>1)/len(df.index)]
+        else:
+            vStat["winPrec"] += [math.nan]
+        vStat["perc"] += [len(df)/len(dfAll)]
+
+        vStat["ava2e"] += [df2e.target.mean()]
+        if len(df2e.index) > 0:
+            vStat["winPrec2e"] += [sum(df2e.target>1)/len(df2e.index)]
+        else:
+            vStat["winPrec2e"] += [math.nan]
+        vStat["perc2e"] += [len(df2e)/len(dfAll)]
+
+        vStat["smpNo"] += [len(df)]
+
+    dfStat = pandas.DataFrame(vStat)
+    print(dfStat)
+
+    # opDf = dfStat.loc[(dfStat.index>=(len(dfStat.index)/2))&(dfStat.ava>1.006)&(dfStat.winPrec>0.55)]
+    opDf = dfStat.loc[(dfStat.winPrec2e>0.6)]
+    opMin = opDf.vMin.min()
+    if os.path.exists("torch_stock.cfg"):
+        with open('torch_stock.cfg') as cfg_file:
+            json_cfg = json.load(cfg_file)
+
+    if "threshold" in json_cfg and json_cfg["threshold"] > 0:
+        opMin = json_cfg["threshold"]
+    if opMin != opMin:
+        opMin = 1.01
+    print(stage, "threshold is", opMin)
+    return opMin
+
 #train it.
 def train(args, Dtr, Val, paths, Dte, last_seq_ts):
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
+    output_layers = args['output_layers']
     merged_hidden_size, merged_num_mid_layers = args['merged_hidden_size'], args['merged_num_mid_layers']
     output_size = args['output_size']
     seq_len = args['seq_len']
@@ -1759,8 +1850,9 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         loss_function = nn.MSELoss().to(device)
         # loss_function = LossLogMse().to(device)
     elif args["type"] == 'LSTMs':
-        model = LSTMs(  input_size, hidden_size, num_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
-        loss_function = nn.MSELoss().to(device)
+        model = LSTMs(  args['input_mask'], input_size, hidden_size, args['dropout'], num_layers, output_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
+        # loss_function = nn.MSELoss().to(device)
+        loss_function = LossCubedMse().to(device)
     elif args["type"] == 'MLPX':
         model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
@@ -1819,9 +1911,13 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
             # seq = seq.to(device)
             label = label.to(device)
             inputs = [[lstmseq.to(device) for lstmseq in seqs]]
-            if input_size[EXP_MODS_MLP_IDX] > 0:
+            if input_size[EXP_MODS_MLP_IDX] > 0: #and args["input_mask"][EXP_MODS_MLP_IDX]:
                 inputs += [mlp_in]
             y_pred = model(inputs)
+            if num_item == 0 and epoch == 0:
+                make_dot(y_pred.mean(), params=dict(model.named_parameters())).render("lstm_model_viz", format="png")
+                make_dot(y_pred.mean(), params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render("lstm_param_viz", format="png")
+                print("model graph saved.")
             # y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
             currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), label.detach().cpu().numpy().flatten())]
             model_result.extend( y_pred.detach().cpu().numpy() )
@@ -1848,16 +1944,21 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
             topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
             topnclose = np.take(targets, topnidx)
             print("\nAverage close is:", topnclose.mean(), np.mean(targets))
-        print('epoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} R2 {:.4f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, r2score(torch.tensor(np.array(model_result)), torch.tensor(np.array(targets))), patience), flush=True)
+        r2score_value = r2score(torch.tensor(np.array(model_result)), torch.tensor(np.array(targets)))
+        print('epoch {:03d} train_loss {:.8f} val_loss {:.8f} best_loss {:.8f} R2 {:.4f} patience {:04d}'.format(epoch, train_loss_all[-1], val_loss_all[-1], best_loss, r2score_value, patience), flush=True)
 
         #get the best model.
         if(val_loss_all[-1]<best_loss):
             best_loss=val_loss_all[-1]
             best_model=copy.deepcopy(model)
             state = {'models': best_model.state_dict()}
+            file_idx = "ping" if cur_sav_idx%2==0 else "pong"
             cur_sav_idx += 1
-            print('Saving models...\r\n', paths[cur_sav_idx%(len(paths))], flush=True)
-            torch.save(state, paths[cur_sav_idx%(len(paths))])
+            paths[file_idx]["val_loss"] = best_loss
+            paths[file_idx]["R2"] = r2score_value
+            paths[file_idx]["Ava_close"] = topnclose.mean()
+            print('Saving models...\r\n', paths[file_idx]["fn"], flush=True)
+            torch.save(state, paths[file_idx]["fn"])
             patience = 0
             lastbest_pred_target = currbest_pred_target
             currbest_pred_target = []
@@ -1932,12 +2033,17 @@ def update_drawback(high, low, profit, maxdrawback):
     return high, low, maxdrawback
 
 def get_module_saved_path(paths, load_best=True):
-    ping_mtime = os.path.getmtime(paths[MODULE_SAVED_PING]) if os.path.exists(paths[MODULE_SAVED_PING]) else 0
-    pong_mtime = os.path.getmtime(paths[MODULE_SAVED_PONG]) if os.path.exists(paths[MODULE_SAVED_PONG]) else 0
+    ping_mtime = os.path.getmtime(paths["ping"]["fn"]) if os.path.exists(paths["ping"]["fn"]) else 0
+    pong_mtime = os.path.getmtime(paths["pong"]["fn"]) if os.path.exists(paths["pong"]["fn"]) else 0
 
     MODULE_CURRENT_SAVED = ((ping_mtime > pong_mtime)^load_best)
-    path = paths[MODULE_CURRENT_SAVED]
-    print("load_best:", load_best, "ping is newest:", (ping_mtime > pong_mtime), "load:", path)
+    fileidx, fileoth = ("ping", "pong") if MODULE_CURRENT_SAVED else ("ping", "pong")
+    path = paths[fileidx]["fn"]
+    print("load_best:", load_best, "ping is newest:", (ping_mtime > pong_mtime), "load:", path, "exist:", os.path.exists(path))
+    if load_best == False and os.path.exists(paths[fileoth]["fn"]):
+        import shutil
+        shutil.copyfile(paths[fileoth]["fn"], f'{paths["best"]["fn"]}.{paths[fileoth]["R2"]}.{paths[fileoth]["val_loss"]}')
+
     return path, MODULE_CURRENT_SAVED
 
 #validate
@@ -1954,6 +2060,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         
     args=get_args()
     input_size, hidden_size, num_layers = args['input_size'], args['hidden_size'], args['num_layers']
+    output_layers = args['output_layers']
     merged_hidden_size, merged_num_mid_layers = args['merged_hidden_size'], args['merged_num_mid_layers']
     output_size = args['output_size']
     seq_len = args['seq_len']
@@ -1963,7 +2070,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     elif args['type'] == "LSTM":
         model = LSTM(input_size, hidden_size, num_layers, output_size, batch_size=1).to(device)
     if args["type"] == 'LSTMs':
-        model = LSTMs(  input_size, hidden_size, num_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
+        model = LSTMs(  args['input_mask'], input_size, hidden_size, args['dropout'], num_layers, output_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
     elif args["type"] == 'MLPX':
         model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
@@ -2046,6 +2153,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         profit_topn = 1.0
         profit_all1 = 1.0
         profit_topn1 = 1.0
+        profit_topn2 = 1.0
         profit_info = 1.0
         profit_threshold = 1.0
 
@@ -2060,6 +2168,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         profit_threshold_high = 1.0
         profit_threshold_low = 1.0
         profit_threshold_drawdown = 0.0
+        recount = 0
 
         for date in sortedDate:
             # date = date.item()
@@ -2081,6 +2190,8 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
 
                 date_adj = -1 if LSTM_ADJUST_END == "O" else 0
 
+                # recount += (np.array(model_result_dates[date]) > buy_threshold).sum()
+
                 if idx%(args["multi_steps"]+date_adj) == 0:
                     profit_all *= target_means[-1]
                     profit_mean_high, profit_mean_low, profit_mean_drawdown = update_drawback(profit_mean_high, profit_mean_low, profit_all, profit_mean_drawdown)
@@ -2096,17 +2207,27 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                                                                                                              profit_threshold_low, profit_threshold, profit_threshold_drawdown)
                     # if target_threshold_means[-1] == target_threshold_means[-1]:
                     #     profit_threshold *= target_threshold_means[-1]
-                else:
+                elif idx%(args["multi_steps"]+date_adj) == 1:
                     profit_all1 *= target_means[-1]
                     profit_topn1 *= target_topn_means[-1]
+                elif idx%(args["multi_steps"]+date_adj) == 2:
+                    profit_topn2 *= target_topn_means[-1]
 
                 # print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_info, profit_threshold,
                 #       # profit_all1, profit_topn1,
                 #       np.mean(target_means), np.mean(target_topn_means), np.mean(target_info_means),
                 #       np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]), profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
-                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_threshold,
-                      np.mean(target_means), np.mean(target_topn_means), np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]),
-                      profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
+                dfProf = pandas.DataFrame(index=[pandas.to_datetime(date).date()], data={"cur_mean": target_means[-1], "cur_topn": target_topn_means[-1], "all": profit_all, "all_mean": np.mean(target_means),
+                                                "topn0": profit_topn, "topn_mean": np.mean(target_topn_means),
+                                                "threshold": profit_threshold, "thresholdMean": np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]),
+                                                "drawdown": profit_mean_drawdown, "topndrawdown": profit_topn_drawdown, "thrdrawdown": profit_threshold_drawdown,
+                                                "topn1": profit_topn1, "topn2": profit_topn2
+                                                })
+                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:")
+                print(dfProf)
+                # print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_threshold,
+                #       np.mean(target_means), np.mean(target_topn_means), np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]),
+                #       profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
                 topncode = np.take(code_dates[date], topnidx)
                 # topnpred = np.take(model_result_dates[date], topnidx)
                 topncode = topncode.astype(float).astype(int).astype(str)
@@ -2115,7 +2236,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                 np.set_printoptions(linewidth=120, formatter={'float_kind': lambda x: '{:06.4f}'.format(x)})
                 # topnAll = np.concatenate((topncode, topnclose, topnpred), axis=1)
                 topnAll = np.concatenate((topncode.reshape(1, -1), topnclose.reshape(1, -1).round(4), topnpred.reshape(1, -1).round(4)), axis=0)
-                print(f"topn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}" ) #\r\n{topnclose}
+                print(f"topn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}, {idx%(args['multi_steps']+date_adj)}, {(np.array(model_result_dates[date]) >= buy_threshold).sum()}" ) #\r\n{topnclose}, {recount}
                 idx += 1
 
         print(datetime.datetime.fromtimestamp(sortedDate[0]/1e9), "--->", datetime.datetime.fromtimestamp(sortedDate[-1]/1e9))
@@ -2123,11 +2244,10 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     RPE_FILE_R = "/home/yacc/shares/rpe_pre.xlsx.colored.xlsx"
     XSY_FILE_R = "/home/yacc/shares/xsy_pre.xlsx.colored.xlsx"
     STING_FILE_R = "/home/yacc/shares/sting_pre.xlsx.colored.xlsx"
-    BDT_FILE_R = "/home/yacc/shares/bdt_pre.xlsx.colored.xlsx"
     KJYL_FILE_R = "/home/yacc/shares/x_kjyl_pre_111.xlsx.colored.xlsx.xlsx" #"/home/yacc/shares/kjyl_pre.xlsx.colored.xlsx"
 
     fileDict = {"xsy": XSY_FILE_R, "rpe": RPE_FILE_R, "sting": STING_FILE_R,
-            "bdt": BDT_FILE_R, "kjyl": KJYL_FILE_R}
+             "kjyl": KJYL_FILE_R}
     fileDict = {"kjyl": KJYL_FILE_R}
     filedfList = {}
 
@@ -2260,11 +2380,16 @@ if __name__ == '__main__' :
     #batch_size should be 5-8 for sinble parameters pridiction and 100 for multi-parameter prediction.
     #xxx_begin and xxx_end for data split, can be modified per yourslef.
     args={
+          "input_mask":[[True, False], False], #number of input parameters used in predition. you can modify it in data index list.
           "input_size":[[BK_SIZE*len(COLS), len(FS_COLS)], 2], #number of input parameters used in predition. you can modify it in data index list.
-          "hidden_size":[[1, 2*len(FS_COLS)], 4], #[[int(BK_SIZE*len(COLS)*2), 2*len(FS_COLS)], 4], ##number of cells in one hidden layer.
-          "num_layers":[[1, 2], 2], #[[2, 2], 2],  #number of hidden layers in predition module.
+          "hidden_size":[[int(BK_SIZE*len(COLS)*2), 3*len(FS_COLS)], 4], #[[int(BK_SIZE*len(COLS)*2), 2*len(FS_COLS)], 4], ##number of cells in one hidden layer.
+          "dropout":[[[0.5, 0.5], 0.2], 0], #[[2, 2], 2],  #number of hidden layers in predition module.
+          "num_layers":[[2, 3], 2], #[[2, 2], 2],  #number of hidden layers in predition module.
+          "output_layers": [[BK_SIZE*len(COLS), 0], 0], #[[1, len(FS_COLS)], 2],
           "merged_hidden_size": 2*(1+len(FS_COLS)), #2*(len(COLS)+len(FS_COLS)),
           "merged_num_mid_layers": 2,
+          "seq_len":[EXP_DK1D_SEQ_LEN, EXP_FS1Y_SEQ_LEN], #one contionus series input data will be used to predict the selected parameter.
+          "multi_steps":10, #next x days's stock price can be predictions. maybe 1,2,3....
           "output_size":BK_SIZE, #number of parameter will be predicted.
           "lr":3e-4, #1e-5,
           "weight_decay":0.0, #0001,
@@ -2275,8 +2400,6 @@ if __name__ == '__main__' :
           "gamma":0.5,
           "epochs":50000,
           "batch_size":64,#batch of data will be push in model. large batch in multi parameter prediction will be better.
-          "seq_len":[EXP_DK1D_SEQ_LEN, EXP_FS1Y_SEQ_LEN], #one contionus series input data will be used to predict the selected parameter.
-          "multi_steps":5, #next x days's stock price can be predictions. maybe 1,2,3....
           "pred_type":"close",#open price / close price / high price / low price.
           "train_end":1.0,
           "val_begin":0.6,
@@ -2316,10 +2439,27 @@ if __name__ == '__main__' :
     #save module data to file in the path.
     # path_file='./model/'+'module'+ '-'+ data_file_name +'-'+pred_type+'-0'+ str(args['multi_steps']) +'.pkl' #Module for the next "x" day's stock price prediction.
     #test cuda
-    path_file= [
-        './model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}.ping' + '.pkl', #Module for the next "x" day's stock price prediction.
-        './model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}.pong' + '.pkl', #Module for the next "x" day's stock price prediction.
-    ]
+    # path_file= [
+    #     './model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}.ping' + '.pkl', #Module for the next "x" day's stock price prediction.
+    #     './model/'+'module-' + args['type'] + '-bk' + f'-{args["input_size"]}-{args["num_layers"]}X{args["hidden_size"]}-{args["output_size"]}.pong' + '.pkl', #Module for the next "x" day's stock price prediction.
+    # ]
+    path_file = {
+        "ping": {
+            "fn": f'./model/module-{args["type"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
+                  f'{args["merged_num_mid_layers"]}X{args["merged_hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}.ping' + '.pkl',
+            "val_loss": math.inf, "R2": -math.inf,  "Ava_close": -math.inf,
+        },
+        "pong": {
+            "fn": f'./model/module-{args["type"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
+                  f'{args["merged_num_mid_layers"]}X{args["merged_hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}.pong' + '.pkl',
+            "val_loss": math.inf, "R2": -math.inf,  "Ava_close": -math.inf,
+        },
+        "best": {
+            "fn": f'./model/module-{args["type"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
+                  f'{args["merged_num_mid_layers"]}X{args["merged_hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}.best' + '.pkl',
+            "val_loss": math.inf, "R2": -math.inf,  "Ava_close": -math.inf,
+        }
+    }
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     signal.signal(signal.SIGUSR1, test_signal)
     print("CUDA or CPU:", device)
@@ -2328,7 +2468,7 @@ if __name__ == '__main__' :
     Dtr, Val, Dte, last_seq_ts, testdf = nn_stocksdata_seq(args['batch_size'], args['type'])
 
     lrs = [3e-4, 1e-4, 3e-5, 1e-5, 3e-6, 1e-6]
-    # lrs = [3e-7, 1e-7]
+    # lrs = [3e-5, 1e-5, 3e-6, 1e-6]
 
     for lr in lrs:
         args["lr"] = lr
@@ -2337,8 +2477,14 @@ if __name__ == '__main__' :
         if NO_TRAIN == False:
             buy_threshold = train(args, Dtr, Val, path_file, Dte, last_seq_ts)
         else:
-            buy_threshold = math.nan
+            if os.path.exists("torch_stock.cfg"):
+                with open('torch_stock.cfg') as cfg_file:
+                    json_cfg = json.load(cfg_file)
+                    buy_threshold = json_cfg["threshold"]
+            else:
+                buy_threshold = math.nan
         #teest it.
+        print("threshold for test is", buy_threshold)
         test(args, Dte, path_file, data_pred_index, last_seq_ts, testdf, buy_threshold)
 
         if NO_TRAIN == True:
