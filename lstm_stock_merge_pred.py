@@ -57,7 +57,7 @@ TORCH_REPRODUCIBILITY = False
 reproduct_args = {}
 
 MAX_SEQ_LEN = 128
-LABEL_INFO_LEN = 3 #label, code, date, info
+LABEL_INFO_LEN = 4 #label, code, date, info, predict_date
 
 CLOSE_LABEL_THRESHOLD = 0.94
 NP_TOPN = 10
@@ -825,14 +825,16 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
     fscode = fsdata.index.get_level_values("code").unique()
 
     for code in dataAll.index.get_level_values("code").unique():
-        data = dataAll.loc[("szse", code)].sort_index()
         if code not in fscode:
             continue #fixme bank type stock not exist in fsdata
+        data = dataAll.loc[("szse", code)].sort_index()
         fsdf = fsdata.loc[("szse", code)].sort_index()
         mlpdf = mlpdataset.loc[("szse", code)] #.sort_index()
         # print("proc code", code)
         train_seqs = []
         train_labels = []
+        fsdfseqs = []
+        mlpseqs = []
         train_adjs = []
         train_adjs_end = []
         dataLen = 0
@@ -846,6 +848,7 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
         # idxvol_idx = list(data.columns).index("idxvol")
         # vod_idx    = list(data.columns).index("vol")
         range_norm_list = []
+        dateseq = []
         for i in range(len(data.columns)):
             if "vol" in data.columns[i]:
                 range_norm_list += [i]
@@ -865,6 +868,9 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
             #     train_label = (data.loc[date, "close"]>=close_topn).to_numpy().flatten().tolist()
             train_seqs += [train_seq]
             train_labels += [[denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"])]]
+            dateseq += [date]
+            fsdfseqs += [fsdfseq.values]
+            mlpseqs += [mlpdf.loc[date].values]
 
             if LSTM_ADJUST_START == "O":
                 train_adjs += [[1.0/(denorm_fn(data.loc[date, "open"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_open"]["range"])*denorm_fn(data.loc[date, "close"], dfCfgNorm[DATA_SETS[0]]["OHLCV"]["hfq_close"]["range"]))]]
@@ -910,11 +916,12 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
                 if any(missing_seq[dataLen - predstep:dataLen - predstep+seq_len]) ==False and missing_seq[-steps]==False and any(missing_seq[-steps+1:])==False \
                         and any(bigrise_seq[-RISE_WIN-steps:-steps]):
                     # seq.append((train_seq_ts, train_label_ts, code, date.value, infos[-steps]))
-                    last_input_seq = [[npa, fsdfseq.values], mlpdf.loc[date].values]
+                    last_input_seq = [[npa, fsdfseqs[dataLen - predstep+seq_len-1]], mlpseqs[dataLen - predstep+seq_len-1]]
                     last_label = train_adjs[-steps] * np.array(train_labels, dtype=np.float32)[-steps:].prod(axis=0)*train_adjs_end[-1]
-                    last_date = date
+                    last_date = dateseq[dataLen - predstep+seq_len-1]
+                    predict_date = dateseq[-1]
                     mmdataset.map(mmdataset_idx, last_input_seq, last_label,
-                                                       np.array([float(code), float(last_date.value), float(infos[-steps][0])], dtype=np.float32))
+                                                       np.array([float(code), float(last_date.value), float(infos[-steps][0]), float(predict_date.value)], dtype=np.float32))
                     mmdataset_idx += 1
                 else:
                     pass
@@ -922,7 +929,8 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
         if last_input_seq is not None and any(bigrise_seq[-RISE_WIN:]):
             # train_label_ts = torch.FloatTensor(train_adjs[-steps] * np.array(train_labels)[-steps:].prod(axis=0)*train_adjs_end[-1]).view(-1)
             # np.empty(0) if no mlp input
-            last_seq_ts += [(tuple(last_input_seq[EXP_MODS_LSTM_IDX]), mlpdf.loc[date].values, last_label, code, last_date.value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
+            last_seq_ts += [(tuple([np.array(train_seqs[-seq_len:], dtype=np.float32), fsdfseqs[-1]]), mlpseqs[-1],
+                             last_label, code, predict_date.value, infos[-1][0], (predict_date + pandas.Timedelta(days=steps)).value)] #todo train_label_ts is not the true label of future seq, but doesn't matter
         else:
             pass
             #print("missing")
@@ -1533,12 +1541,20 @@ class LossCubedMse(nn.Module):
         loss = (torch.pow(inputs, 3) - torch.pow(targets, 3))**2
         return loss.mean()
 
-class LossLogMse(nn.Module):
+class LossExpMse(nn.Module):
     def __init__(self):
         super(LossLogMse, self).__init__()
 
     def forward(self, inputs, targets):
         loss = (torch.pow(math.e, inputs) - torch.pow(math.e, targets))**2
+        return loss.mean()
+
+class LossLogMse(nn.Module):
+    def __init__(self):
+        super(LossLogMse, self).__init__()
+
+    def forward(self, inputs, targets):
+        loss = (torch.log(inputs) - torch.log(targets))**2
         return loss.mean()
 
 #nn module.
@@ -1852,7 +1868,8 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
     elif args["type"] == 'LSTMs':
         model = LSTMs(  args['input_mask'], input_size, hidden_size, args['dropout'], num_layers, output_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
         # loss_function = nn.MSELoss().to(device)
-        loss_function = LossCubedMse().to(device)
+        # loss_function = LossCubedMse().to(device)
+        loss_function = LossLogMse().to(device)
     elif args["type"] == 'MLPX':
         model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
@@ -1906,7 +1923,7 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         targets = []
         model_result = []
         model.eval()
-        for (seqs, mlp_in, label, _, _, _) in Val:
+        for (seqs, mlp_in, label, _, _, _, _) in Val:
 
             # seq = seq.to(device)
             label = label.to(device)
@@ -1979,7 +1996,7 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         train_loss = 0
         num_item=0
         model.train()
-        for (seqs, mlp_in, label, _, _, _) in Dtr:
+        for (seqs, mlp_in, label, _, _, _, _) in Dtr:
             # seq = seq.to(device)
             label = label.to(device)
             inputs = [[lstmseq.to(device) for lstmseq in seqs]]
@@ -2104,7 +2121,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         targets = []
         model_result = []
         infos = {}
-        for (seqs, mlp_in, target, code, date, info) in tqdm(Dte):
+        for (seqs, mlp_in, target, code, date, info, _) in tqdm(Dte):
             date = date.item()
             if date not in targets_dates:
                 model_result_dates[date] = []
@@ -2169,6 +2186,8 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         profit_threshold_low = 1.0
         profit_threshold_drawdown = 0.0
         recount = 0
+        over_threshold_num = 0
+        all_num = 0
 
         for date in sortedDate:
             # date = date.item()
@@ -2217,14 +2236,15 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                 #       # profit_all1, profit_topn1,
                 #       np.mean(target_means), np.mean(target_topn_means), np.mean(target_info_means),
                 #       np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]), profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
-                dfProf = pandas.DataFrame(index=[pandas.to_datetime(date).date()], data={"cur_mean": target_means[-1], "cur_topn": target_topn_means[-1], "all": profit_all, "all_mean": np.mean(target_means),
+                dfProf = pandas.DataFrame(index=[(pandas.to_datetime(date) + pandas.Timedelta(hours=1)).date()], data={"cur_mean": target_means[-1], "cur_topn": target_topn_means[-1], "all": profit_all, "all_mean": np.mean(target_means),
                                                 "topn0": profit_topn, "topn_mean": np.mean(target_topn_means),
                                                 "threshold": profit_threshold, "thresholdMean": np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]),
                                                 "drawdown": profit_mean_drawdown, "topndrawdown": profit_topn_drawdown, "thrdrawdown": profit_threshold_drawdown,
                                                 "topn1": profit_topn1, "topn2": profit_topn2
                                                 })
-                print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:")
-                print(dfProf)
+                over_threshold_num += (np.array(model_result_dates[date]) >= buy_threshold).sum()
+                all_num += len(model_result_dates[date])
+                # print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:")
                 # print(f"\nAverage {NP_TOPN} close is {pandas.to_datetime(date)}:", target_means[-1], target_topn_means[-1], profit_all, profit_topn, profit_threshold,
                 #       np.mean(target_means), np.mean(target_topn_means), np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]),
                 #       profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
@@ -2266,10 +2286,10 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     cached_date = np.nan
     dateList = []
     skipCodeList = []
-    for (seqs, mlp_in, target, code, date) in last_seq_ts:
+    for (seqs, mlp_in, target, code, date, _, _) in last_seq_ts:
         dateList += [date.item()]
     last_day = max(dateList)
-    for (seqs, mlp_in, target, code, date) in last_seq_ts:
+    for (seqs, mlp_in, target, code, date, _, _) in last_seq_ts:
         # y=np.append(y,target.numpy(),axis=0)
         # seq = seq.to(device)
         if date.item() < last_day:
@@ -2445,17 +2465,17 @@ if __name__ == '__main__' :
     # ]
     path_file = {
         "ping": {
-            "fn": f'./model/module-{args["type"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
+            "fn": f'./model/module-{args["type"]}-{args["input_mask"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
                   f'{args["merged_num_mid_layers"]}X{args["merged_hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}.ping' + '.pkl',
             "val_loss": math.inf, "R2": -math.inf,  "Ava_close": -math.inf,
         },
         "pong": {
-            "fn": f'./model/module-{args["type"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
+            "fn": f'./model/module-{args["type"]}-{args["input_mask"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
                   f'{args["merged_num_mid_layers"]}X{args["merged_hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}.pong' + '.pkl',
             "val_loss": math.inf, "R2": -math.inf,  "Ava_close": -math.inf,
         },
         "best": {
-            "fn": f'./model/module-{args["type"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
+            "fn": f'./model/module-{args["type"]}-{args["input_mask"]}-{args["input_size"]}X{args["seq_len"]}X{args["dropout"]}-{args["num_layers"]}X{args["hidden_size"]}-'
                   f'{args["merged_num_mid_layers"]}X{args["merged_hidden_size"]}-{args["output_size"]}-{args["multi_steps"]}.best' + '.pkl',
             "val_loss": math.inf, "R2": -math.inf,  "Ava_close": -math.inf,
         }

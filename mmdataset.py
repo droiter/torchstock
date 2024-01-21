@@ -128,7 +128,7 @@ class MMDataset(Dataset):
             mlp_input = np.empty(0)
         return inputs, mlp_input, \
                torch.FloatTensor(self.mmap_labels[idx]), \
-               str(self.mmap_infos[idx][0]).zfill(STOCK_CODE_LEN), int(self.mmap_infos[idx][1]), self.mmap_infos[idx][2]>0
+               str(self.mmap_infos[idx][0]).zfill(STOCK_CODE_LEN), int(self.mmap_infos[idx][1]), self.mmap_infos[idx][2]>0, int(self.mmap_infos[idx][3])
 
 
     def __len__(self) -> int:

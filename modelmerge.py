@@ -341,8 +341,6 @@ def train(args, Dtr, Val, paths):
             label = label.to(device)
             # y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
             y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], *[mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
-            # make_dot(y_pred.mean(), params=dict(model.named_parameters())).render("lstm_model_viz", format="png")
-            # make_dot(y_pred.mean(), params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render("lstm_param_viz", format="png")
             currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), label.detach().cpu().numpy().flatten())]
             model_result.extend( [*(y_pred.detach().cpu().numpy().flatten())] )
             targets.extend( [*(label.detach().cpu().numpy().flatten())] )
