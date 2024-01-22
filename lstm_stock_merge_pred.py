@@ -2236,11 +2236,11 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                 #       # profit_all1, profit_topn1,
                 #       np.mean(target_means), np.mean(target_topn_means), np.mean(target_info_means),
                 #       np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]), profit_mean_drawdown, profit_topn_drawdown, profit_threshold_drawdown)
-                dfProf = pandas.DataFrame(index=[(pandas.to_datetime(date) + pandas.Timedelta(hours=1)).date()], data={"cur_mean": target_means[-1], "cur_topn": target_topn_means[-1], "all": profit_all, "all_mean": np.mean(target_means),
-                                                "topn0": profit_topn, "topn_mean": np.mean(target_topn_means),
-                                                "threshold": profit_threshold, "thresholdMean": np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]),
-                                                "drawdown": profit_mean_drawdown, "topndrawdown": profit_topn_drawdown, "thrdrawdown": profit_threshold_drawdown,
-                                                "topn1": profit_topn1, "topn2": profit_topn2
+                dfProf = pandas.DataFrame(index=[(pandas.to_datetime(date) + pandas.Timedelta(hours=1)).date()], data={"curAllM": target_means[-1], "curTopM": target_topn_means[-1], "allProf": profit_all, "all_mean": np.mean(target_means),
+                                                "topnPrf0": profit_topn, "topn_mean": np.mean(target_topn_means),
+                                                "thrsh": profit_threshold, "thrshMean": np.mean(np.array(target_threshold_means)[~np.isnan(target_threshold_means)]),
+                                                "drawdown": profit_mean_drawdown, "topdrwd": profit_topn_drawdown, "thrdrwd": profit_threshold_drawdown,
+                                                "topnPrf1": profit_topn1, "topnPrf2": profit_topn2
                                                 })
                 over_threshold_num += (np.array(model_result_dates[date]) >= buy_threshold).sum()
                 all_num += len(model_result_dates[date])
@@ -2255,8 +2255,15 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
                 topncode = v(topncode)
                 np.set_printoptions(linewidth=120, formatter={'float_kind': lambda x: '{:06.4f}'.format(x)})
                 # topnAll = np.concatenate((topncode, topnclose, topnpred), axis=1)
-                topnAll = np.concatenate((topncode.reshape(1, -1), topnclose.reshape(1, -1).round(4), topnpred.reshape(1, -1).round(4)), axis=0)
-                print(f"topn close is:--------{pandas.to_datetime(date)} code close pred--------\r\n{topnAll}\r\n{np.mean(topnclose)}, {idx%(args['multi_steps']+date_adj)}, {(np.array(model_result_dates[date]) >= buy_threshold).sum()}" ) #\r\n{topnclose}, {recount}
+                # topnAll = np.concatenate((topncode.reshape(1, -1), topnclose.reshape(1, -1).round(4), topnpred.reshape(1, -1).round(4)), axis=0)
+                topnAll = pandas.DataFrame(index=["pred", "close"], data=[topnpred.flatten(), topnclose.flatten()], columns=topncode.flatten())
+                print(f"\nAverage {NP_TOPN}:----{(pandas.to_datetime(date) + pandas.Timedelta(hours=1)).date()} code close pred---- "
+                      # f"{np.mean(topnclose)}(topnmean), "
+                      f"{idx%(args['multi_steps']+date_adj)}, {over_threshold_num}, {over_threshold_num/all_num}, "
+                      f"{np.mean(model_result_dates[date])}((allpredmean))\r\n"
+                      f"{dfProf}\r\n"
+                      f"{topnAll}" ) #\r\n{topnclose}, {recount}
+                # print(dfProf)
                 idx += 1
 
         print(datetime.datetime.fromtimestamp(sortedDate[0]/1e9), "--->", datetime.datetime.fromtimestamp(sortedDate[-1]/1e9))
@@ -2324,12 +2331,14 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     topnidx = np.array(model_result).argsort(axis=0)[-NP_TOPN:, :]
     topnclose = np.take(codes, topnidx)
     print("predicting code", pandas.to_datetime(date.item()), "skip", skipCodeList)
-    for c in topnclose:
-        print(c)
+    # for c in topnclose:
+    #     print(c)
     # print(f"\nAverage {NP_TOPN} close is:", topnclose.mean())
     topnpred = np.take(model_result, topnidx)
-    topnclose = np.concatenate((topnclose, topnpred), axis=1)
-    print("\ntopn close is:\r\n", topnclose)
+    # topnclose = np.concatenate((topnclose, topnpred), axis=1)
+    dfPed = pandas.DataFrame(index=["topnpred"], data=topnpred.T, columns=topnclose.flatten())
+    # print("\ntopn close is:\r\n", topnclose.T)
+    print(dfPed)
 
     typeLists = [["xsy", "rpe", "sting", "kjyl", "bdt"], ["xsy"], ["rpe"], ["sting"], ["kjyl"], ["bdt"]]
     typeLists = [["kjyl"]]
@@ -2343,8 +2352,8 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         maskedPred = np.array(model_result)[stockMask]
         maskedAll = np.concatenate((maskedCode.reshape([-1, 1]), maskedPred), axis=1)
         sortedAll = maskedAll[maskedAll[:, 1].argsort()]
-        print("\ntopn close code is:\r\n", typeList, sortedAll[:, 0])
-        print("\ntopn close is:\r\n", typeList, sortedAll)
+        print(f"\ntopn close code is {typeList}:\r\n", sortedAll[:, 0].T)
+        # print("\ntopn close is:\r\n", typeList, sortedAll)
 
     # y = (m - n) * y + n
     # pred = (m - n) * pred + n
