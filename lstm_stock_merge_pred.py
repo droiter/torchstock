@@ -104,6 +104,11 @@ EXP_FS_YEARS = 3
 EXP_DK1D_SEQ_LEN = 96
 EXP_FS1Y_SEQ_LEN = 3
 
+dumy_proc = lambda x : x
+
+LABEL_PROC_NF = dumy_proc #np.log
+PRED_PROC_FN =  dumy_proc #np.exp
+
 #cmd line parmeters.
 def cmd_line():
     parser = argparse.ArgumentParser(description='Calculate model according to stockid')
@@ -823,9 +828,10 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
     mmdataset_idx = 0
 
     fscode = fsdata.index.get_level_values("code").unique()
+    mvcode = mlpdataset.index.get_level_values("code").unique()
 
     for code in dataAll.index.get_level_values("code").unique():
-        if code not in fscode:
+        if code not in fscode or code not in mvcode:
             continue #fixme bank type stock not exist in fsdata
         data = dataAll.loc[("szse", code)].sort_index()
         fsdf = fsdata.loc[("szse", code)].sort_index()
@@ -917,7 +923,7 @@ def process_stocks_norm_dataset(dataAll, fsdata, mlpdataset, batch_size, shuffle
                         and any(bigrise_seq[-RISE_WIN-steps:-steps]):
                     # seq.append((train_seq_ts, train_label_ts, code, date.value, infos[-steps]))
                     last_input_seq = [[npa, fsdfseqs[dataLen - predstep+seq_len-1]], mlpseqs[dataLen - predstep+seq_len-1]]
-                    last_label = train_adjs[-steps] * np.array(train_labels, dtype=np.float32)[-steps:].prod(axis=0)*train_adjs_end[-1]
+                    last_label = LABEL_PROC_NF(train_adjs[-steps] * np.array(train_labels, dtype=np.float32)[-steps:].prod(axis=0)*train_adjs_end[-1])
                     last_date = dateseq[dataLen - predstep+seq_len-1]
                     predict_date = dateseq[-1]
                     mmdataset.map(mmdataset_idx, last_input_seq, last_label,
@@ -1400,13 +1406,14 @@ def nn_stocksdata_seq(batch_size, lstmtype):
 
     if NO_TRAIN == False:
         train = dataset.loc[dataset.index.get_level_values("date")<=train_date_end]
-        val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end) & (dataset.index.get_level_values("date")<=val_date_end)]
+        val = dataset.loc[(dataset.index.get_level_values("date")>train_date_end + pandas.Timedelta(days=int(algs["multi_steps"]*7/5)))
+                          & (dataset.index.get_level_values("date")<=val_date_end)]
         # fs_train = fsdataset.loc[fsdataset.index.get_level_values("date")<=train_date_end]
         # fs_val = fsdataset.loc[(fsdataset.index.get_level_values("date")>train_date_end) & (fsdataset.index.get_level_values("date")<=val_date_end)]
 
     if NO_TEST == False:
         args=get_args()
-        test = dataset.loc[dataset.index.get_level_values("date")>val_date_end]
+        test = dataset.loc[dataset.index.get_level_values("date")>val_date_end + pandas.Timedelta(days=int(algs["multi_steps"]*7/5))]
         if MAX_SEQ_LEN < args["seq_len"][EXP_LSTM_SEQ_IDX_DK1D]:
             print("overflow")
             sys.exit()
@@ -1543,7 +1550,7 @@ class LossCubedMse(nn.Module):
 
 class LossExpMse(nn.Module):
     def __init__(self):
-        super(LossLogMse, self).__init__()
+        super(LossExpMse, self).__init__()
 
     def forward(self, inputs, targets):
         loss = (torch.pow(math.e, inputs) - torch.pow(math.e, targets))**2
@@ -1556,6 +1563,57 @@ class LossLogMse(nn.Module):
     def forward(self, inputs, targets):
         loss = (torch.log(inputs) - torch.log(targets))**2
         return loss.mean()
+
+class LossTopnMse(nn.Module):
+    def __init__(self):
+        super(LossTopnMse, self).__init__()
+
+    def forward(self, inputs, targets):
+        mean = torch.mean(targets)
+        loss = (targets>=mean)*((inputs - targets)**2)
+        return loss.mean()
+
+class LossSaferLogMse(nn.Module):
+    def __init__(self):
+        super(LossSaferLogMse, self).__init__()
+        # super(LossSaferLogMse, self).__init__()
+
+    def forward(self, inputs, targets):
+        lossMse = (inputs<=0)*((inputs - targets)**2)
+        lossLog = (inputs>0)*((torch.log(inputs) - torch.log(targets)).nan_to_num()**2)
+        loss = lossLog + lossMse
+        return loss.mean()
+
+class LossSafeLogMse(nn.Module):
+    def __init__(self):
+        super(LossSafeLogMse, self).__init__()
+
+    def forward(self, inputs, targets):
+        if (inputs <=0).any().item() == True:
+            loss = (inputs - targets)**2
+        else:
+            loss = (torch.log(inputs) - torch.log(targets))**2
+        return loss.mean()
+
+class LossValueAtRisk(nn.Module):
+    def __init__(self):
+        super(LossValueAtRisk, self).__init__()
+        self.alpha = 2
+
+    def forward(self, inputs, targets):
+        arguments = ((((inputs>=1.0) & (targets<1.0) )|((inputs<1.0) & (targets>1.0))) * self.alpha) + 1.0
+        diff = inputs - targets
+        arguments_diff = arguments * diff
+        loss = arguments_diff ** 2
+        return loss.mean()
+
+class LossLogCosh(nn.Module):
+    def __init__(self):
+        super(LossLogCosh, self).__init__()
+
+    def forward(self, y_t, y_prime_t):
+        ey_t = y_t - y_prime_t
+        return torch.mean(torch.log(torch.cosh(ey_t + 1e-12)))
 
 #nn module.
 class MultiLabelLSTM(nn.Module):
@@ -1867,9 +1925,12 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         # loss_function = LossLogMse().to(device)
     elif args["type"] == 'LSTMs':
         model = LSTMs(  args['input_mask'], input_size, hidden_size, args['dropout'], num_layers, output_layers, merged_hidden_size, merged_num_mid_layers, output_size, batch_size=args['batch_size']).to(device)
-        # loss_function = nn.MSELoss().to(device)
+        # loss_function = torch.nn.L1Loss().to(device)
+        loss_function = nn.MSELoss().to(device)
         # loss_function = LossCubedMse().to(device)
-        loss_function = LossLogMse().to(device)
+        # loss_function = LossTopnMse().to(device)
+        # loss_function = LossValueAtRisk().to(device)
+        # loss_function = LossLogCosh().to(device)
     elif args["type"] == 'MLPX':
         model = MLPX(  input_size*seq_len, hidden_size*seq_len, num_layers, output_size, batch_size=args['batch_size']).to(device)
         loss_function = nn.MSELoss().to(device)
@@ -1926,20 +1987,22 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         for (seqs, mlp_in, label, _, _, _, _) in Val:
 
             # seq = seq.to(device)
-            label = label.to(device)
+            label_log = label.to(device)
+            label = PRED_PROC_FN(label.detach().cpu().numpy())
             inputs = [[lstmseq.to(device) for lstmseq in seqs]]
             if input_size[EXP_MODS_MLP_IDX] > 0: #and args["input_mask"][EXP_MODS_MLP_IDX]:
                 inputs += [mlp_in]
-            y_pred = model(inputs)
+            y_pred_log = model(inputs)
+            y_pred = PRED_PROC_FN(y_pred_log.detach().cpu().numpy())
             if num_item == 0 and epoch == 0:
-                make_dot(y_pred.mean(), params=dict(model.named_parameters())).render("lstm_model_viz", format="png")
-                make_dot(y_pred.mean(), params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render("lstm_param_viz", format="png")
+                make_dot(y_pred_log.mean(), params=dict(model.named_parameters())).render("lstm_model_viz", format="png")
+                make_dot(y_pred_log.mean(), params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render("lstm_param_viz", format="png")
                 print("model graph saved.")
             # y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
-            currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), label.detach().cpu().numpy().flatten())]
-            model_result.extend( y_pred.detach().cpu().numpy() )
-            targets.extend( label.detach().cpu().numpy() )
-            loss = loss_function(y_pred, label)
+            currbest_pred_target += [(y_pred.flatten(), label.flatten())]
+            model_result.extend( y_pred )
+            targets.extend( label )
+            loss = loss_function(y_pred_log, label_log)
             val_loss+=loss.item()*len(y_pred)
             num_item+=len(y_pred)
         if num_item>0:
@@ -1998,13 +2061,15 @@ def train(args, Dtr, Val, paths, Dte, last_seq_ts):
         model.train()
         for (seqs, mlp_in, label, _, _, _, _) in Dtr:
             # seq = seq.to(device)
-            label = label.to(device)
+            label_log = label.to(device)
+            # label = torch.exp(label)
             inputs = [[lstmseq.to(device) for lstmseq in seqs]]
             if input_size[EXP_MODS_MLP_IDX] > 0:
                 inputs += [mlp_in]
-            y_pred = model(inputs)
+            y_pred_log = model(inputs)
+            y_pred = y_pred_log #PRED_PROC_FN(y_pred_log.detach().cpu().numpy())
             # y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
-            loss = loss_function(y_pred, label)
+            loss = loss_function(y_pred_log, label_log)
             train_loss+=loss.item()*len(y_pred)
             num_item+=len(y_pred)
             optimizer.zero_grad()
@@ -2122,31 +2187,32 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
         model_result = []
         infos = {}
         for (seqs, mlp_in, target, code, date, info, _) in tqdm(Dte):
+            target = PRED_PROC_FN(target.detach().cpu().numpy())
             date = date.item()
             if date not in targets_dates:
                 model_result_dates[date] = []
                 targets_dates[date] = []
                 code_dates[date] = []
                 infos[date] = []
-            y=np.append(y,target.numpy(),axis=0)
+            y=np.append(y,target,axis=0)
             # seq = seq.to(device)
             with torch.no_grad():
                 inputs = [[lstmseq.to(device) for lstmseq in seqs]]
                 if input_size[EXP_MODS_MLP_IDX] > 0:
                     inputs += [mlp_in]
-                y_pred = model(inputs)
+                y_pred = PRED_PROC_FN(model(inputs).detach().cpu().numpy())
                 # y_pred = model([[lstmseq.to(device) for lstmseq in seqs[EXP_MODS_LSTM_IDX]], [mlpseq.to(device) for mlpseq in seqs[EXP_MODS_MLP_IDX]]])
                 # model_result_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], y_pred.detach().cpu().numpy()) )
                 # targets_dates[date].extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
                 # code_dates[date].extend( code )
                 # model_result.extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], y_pred.detach().cpu().numpy()) )
                 # targets.extend( np.power(dfCfg[DATA_FN_KEY]['hfq_close'], target.detach().cpu().numpy()) )
-                currbest_pred_target += [(y_pred.detach().cpu().numpy().flatten(), target.detach().cpu().numpy().flatten())]
-                model_result_dates[date].extend( y_pred.detach().cpu().numpy() )
-                targets_dates[date].extend( target.detach().cpu().numpy() )
+                currbest_pred_target += [(y_pred.flatten(), target.flatten())]
+                model_result_dates[date].extend( y_pred )
+                targets_dates[date].extend( target )
                 code_dates[date].extend( code )
-                model_result.extend( y_pred.detach().cpu().numpy() )
-                targets.extend( target.detach().cpu().numpy() )
+                model_result.extend( y_pred )
+                targets.extend( target )
                 if isinstance(info[0], torch.Tensor):
                     infos[date].extend([info[0].item()])
                 else:
@@ -2299,6 +2365,7 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
     for (seqs, mlp_in, target, code, date, _, _) in last_seq_ts:
         # y=np.append(y,target.numpy(),axis=0)
         # seq = seq.to(device)
+        target = PRED_PROC_FN(target.detach().cpu().numpy())
         if date.item() < last_day:
             skipCodeList += [code]
             continue
@@ -2306,11 +2373,11 @@ def test(args, Dte, paths,data_pred_index, last_seq_ts, testdf, buy_threshold=ma
             inputs = [[lstmseq.to(device) for lstmseq in seqs]]
             if input_size[EXP_MODS_MLP_IDX] > 0:
                 inputs += [mlp_in]
-            y_pred = model(inputs)
+            y_pred = PRED_PROC_FN(model(inputs).detach().cpu().numpy())
             # y_pred = model(seq)
             # pred=np.append(pred,y_pred.cpu().numpy(),axis=0)
-            model_result.extend( y_pred.detach().cpu().numpy() )
-            targets.extend( target.detach().cpu().numpy() )
+            model_result.extend( y_pred )
+            targets.extend( target )
             codes.extend(code)
             bfound = False
             for stocktype in filedfList.keys():
